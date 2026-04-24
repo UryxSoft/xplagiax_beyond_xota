@@ -10,7 +10,7 @@ import os
 
 class Config:
     # ── Flask ──────────────────────────────────────────────────────
-    SECRET_KEY =  "dev-only-change-me"
+    SECRET_KEY =  "edw-32fdx-34f421-m56e"
     DEBUG =  "1"
 
     # ── Limits ─────────────────────────────────────────────────────
