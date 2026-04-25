@@ -28,12 +28,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #       which is compatible with numpy<2.0 and transformers<5.0.
 #       We pass the overrides AFTER -r so they win over the file constraints.
 COPY requirements.txt .
+
+# ── Resolve Dependency Conflicts ─────────────────────────────────────────────
+# Remove the macOS-specific pins from requirements.txt so they don't 
+# conflict with the optimized Linux versions we install below.
+RUN sed -i '/torch/d; /numpy/d; /transformers/d; /spacy/d' requirements.txt
+
 RUN pip install --user --no-cache-dir --prefer-binary \
-    -r requirements.txt \
     "torch>=2.4.0" \
     "numpy>=1.26.4,<2.0" \
     "transformers>=4.48.2,<5.0" \
-    "spacy>=3.7.0"
+    "spacy>=3.7.0" \
+    && pip install --user --no-cache-dir -r requirements.txt
 
 # ── Pre-download NLTK data (punkt_tab used by sentence splitting) ────────────
 RUN python -c "\
