@@ -83,16 +83,19 @@ COPY --from=builder --chown=flaskuser:flaskuser \
 
 # ── Environment ──────────────────────────────────────────────────────────────
 # Thread counts prevent torch/numpy spawning N threads per gunicorn worker.
+# MALLOC_ARENA_MAX=2 reduces memory fragmentation in glibc, saving RAM.
 ENV PATH=/home/flaskuser/.local/bin:$PATH \
     PYTHONPATH=/app:/app/app/engine \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    MALLOC_ARENA_MAX=2 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
     TOKENIZERS_PARALLELISM=false \
     NLTK_DATA=/home/flaskuser/nltk_data \
-    HF_HOME=/home/flaskuser/.cache/huggingface
+    HF_HOME=/home/flaskuser/.cache/huggingface \
+    WEB_CONCURRENCY=1
 
 # ── Application code ─────────────────────────────────────────────────────────
 # app/engine/ contains the pre-placed model weights (*.bin, Model_groups_*)
@@ -107,9 +110,9 @@ RUN mkdir -p /app/models && chown flaskuser:flaskuser /app/models
 USER flaskuser
 EXPOSE 5006
 
-# start-period=90s: ModernBERT models (~1.8 GB total) take 30-60 s to load.
-# Increase if your server has slow disk / no SSD.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+# start-period=120s: ModernBERT models (~1.8 GB total) take 30-60 s to load.
+# On slow disks with Swap, this can take up to 2 minutes.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5006/health')" || exit 1
 
 CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:create_app()"]

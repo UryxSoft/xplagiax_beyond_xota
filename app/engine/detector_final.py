@@ -2,13 +2,12 @@
 # reference the global `device`, even if a later import fails. ──────
 import torch
 import os
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import sys
 import re
+import time
+from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from tokenizers import normalizers
 from tokenizers.normalizers import Sequence, Replace, Strip, NFKC
 from tokenizers import Regex
