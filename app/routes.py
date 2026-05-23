@@ -209,6 +209,76 @@ def analyze_document():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ASYNC ENDPOINTS (Celery)
+# ═══════════════════════════════════════════════════════════════════
+
+@api_bp.route("/analyze_document_async", methods=["POST"])
+@require_api_key
+def analyze_document_async():
+    """
+    Enqueue the document analysis task and return immediately.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    text = payload.get("text", "")
+    if not text or not isinstance(text, str):
+        return jsonify({"error": "'text' field is required and must be a non-empty string"}), 400
+
+    # Optional plugins
+    plugins_requested = payload.get("plugins", ["ai_detection"])
+    if not isinstance(plugins_requested, list) or not plugins_requested:
+        return jsonify({"error": "'plugins' must be a non-empty list"}), 400
+    
+    payload["plugins"] = [str(p).strip().lower() for p in plugins_requested]
+
+    try:
+        from app.tasks import analyze_document_task
+        task = analyze_document_task.delay(payload)
+        return jsonify({"status": "accepted", "task_id": task.id}), 202
+    except Exception as e:
+        logger.error(f"Error enqueueing task: {e}")
+        return jsonify({"error": "Failed to enqueue task"}), 500
+
+
+@api_bp.route("/analyze_status/<task_id>", methods=["GET"])
+@require_api_key
+def analyze_status(task_id):
+    """
+    Check the status of an async analysis task.
+    """
+    from app.celery_app import celery
+    task = celery.AsyncResult(task_id)
+    
+    if task.state == 'PENDING':
+        response = {
+            'status': 'pending',
+            'state': task.state
+        }
+    elif task.state != 'FAILURE':
+        response = {
+            'status': 'processing' if task.state != 'SUCCESS' else 'ok',
+            'state': task.state
+        }
+        if task.state == 'SUCCESS':
+            # task.info contains the returned dict from the task
+            # The task returns {"status": "ok", "results": ...}
+            response.update(task.info)
+    else:
+        # something went wrong in the background job
+        response = {
+            'status': 'error',
+            'state': task.state,
+            'error': str(task.info)  # exception raised
+        }
+    return jsonify(response)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # GET /health — Kubernetes liveness probe
 # ═══════════════════════════════════════════════════════════════════
 

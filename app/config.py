@@ -25,8 +25,9 @@ class Config:
     COMPRESS_MIN_SIZE = 256
 
     # ── Celery (optional, for heavy async plugins) ─────────────────
-    CELERY_BROKER_URL =  "redis://localhost:6379/0"
-    CELERY_RESULT_BACKEND = "redis://localhost:6379/1"
+    REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
+    CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", f"{REDIS_URL}/0")
+    CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", f"{REDIS_URL}/1")
 
     # ── Plugin settings ────────────────────────────────────────────
     PLUGIN_DIR = "app/plugins"
