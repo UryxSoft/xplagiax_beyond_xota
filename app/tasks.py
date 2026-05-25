@@ -21,7 +21,7 @@ def analyze_document_task(self, payload):
     max_tokens = int(payload.get("max_tokens", 150))
     
     registry = current_app.config["PLUGIN_REGISTRY"]
-    timeout = current_app.config.get("PLUGIN_TIMEOUT", 30)
+    timeout = current_app.config.get("PLUGIN_TIMEOUT", 120)
 
     # 1. Run standard plugins
     results = registry.run(plugins_requested, text, timeout=timeout)
