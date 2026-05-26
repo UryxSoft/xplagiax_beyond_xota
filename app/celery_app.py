@@ -24,10 +24,9 @@ def make_celery():
 
     celery.Task = ContextTask
     celery.flask_app = app
-    
-    # Import tasks to ensure they are registered with Celery
-    import app.tasks
-    
     return celery
 
 celery = make_celery()
+
+# Import tasks AFTER celery is initialized to avoid circular imports
+import app.tasks
