@@ -673,34 +673,52 @@ xplagiax_xota/
 
 ---
 
+---
+
+## Memory & Performance Optimizations (May 2026)
+
+To operate efficiently on memory-constrained Virtual Private Servers (VPS), several architectural optimizations have been implemented:
+
+### 1. Single-Container CoW Architecture
+Running a separate Celery worker container duplicates the ~1.7 GB ModernBERT models in memory. Instead, the application uses a **single container** where Gunicorn's master process loads the models once (`preload_app=True`) and internally forks the Celery worker (`when_ready` hook). 
+* **Result:** Total memory usage drops from ~6.8 GB to ~2.8 GB because the models are shared via Linux Copy-on-Write (CoW).
+
+### 2. Gunicorn Worker Limits
+ML workloads are memory-intensive (each worker adds ~200MB+ overhead). The Gunicorn config limits workers to `2` by default instead of `2 * CPU_count`.
+
+### 3. Celery Memory Management
+Celery tasks are configured to prevent memory leaks and zombie processes during long document analysis:
+* **Garbage Collection:** Explicit `gc.collect()` and `torch.cuda.empty_cache()` are called in the `finally` block of every task (`tasks.py`).
+* **Timeouts:** Tasks have a hard `time_limit=300s` to kill runaway processes before they exhaust memory.
+* **Result TTL:** `result_expires = 3600` prevents the Redis backend from accumulating stale task results indefinitely.
+* **Prefetch Limits:** `worker_prefetch_multiplier = 1` ensures the worker only pulls one heavy ML task at a time.
+* **Auto-Restart:** A `child_exit` hook monitors the internal Celery worker and automatically restarts it if it crashes due to an OOM or segfault.
+
+### Deploying the Optimized Container
+
 ```bash
+# 1. Stop and remove any separate celery worker to free up RAM
+docker stop xplagiax_xota_worker 2>/dev/null || true
+docker rm xplagiax_xota_worker 2>/dev/null || true
 
-# Eliminar el worker separado si lo tienes corriendo
-docker stop xplagiax_celery_worker 2>/dev/null || true
-docker rm xplagiax_celery_worker 2>/dev/null || true
-
-# Rebuild con el nuevo gunicorn.conf.py
+# 2. Rebuild the image
 docker build -t xplagiax_xota:latest .
 
-# Relanzar el contenedor único — ahora incluye el worker de Celery internamente
-docker stop xplagiax-xota
+# 3. Launch the single container (Web + Internal Celery Worker)
+docker stop xplagiax-xota 2>/dev/null || true
 docker run -d \
   --name xplagiax-xota \
   --network xplagiax-net \
+  --restart unless-stopped \
   -p 5006:5006 \
   -e WEB_CONCURRENCY=2 \
   -e REDIS_URL="redis://redis:6379" \
+  -e CELERY_BROKER_URL="redis://redis:6379/0" \
+  -e CELERY_RESULT_BACKEND="redis://redis:6379/1" \
   xplagiax_xota:latest
 
-# Ver los 3 procesos (master + 2 workers + celery) en el mismo contenedor
+# 4. Verify the internal Celery worker is running alongside Gunicorn
 docker exec xplagiax-xota ps aux | grep -E "gunicorn|celery"
-
-# Confirmar que el celery worker está conectado a Redis
-docker logs xplagiax-xota 2>&1 | grep -E "celery|Celery|CoW"
-
-# Monitorear RAM — debe quedarse estable sin duplicar
-docker stats xplagiax-xota --no-stream
-
 ```
 
 ## Kubernetes Deployment
