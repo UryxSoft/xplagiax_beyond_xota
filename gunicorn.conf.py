@@ -3,14 +3,16 @@ gunicorn.conf.py — Production Gunicorn configuration.
 
 Key design decisions:
     - preload_app = True → loads the app ONCE in the master process,
-      then forks workers. Heavy models (torch, spacy, etc.) loaded at
+      then forks workers. Heavy models (torch, transformers) loaded at
       module level are shared across workers via Linux Copy-on-Write,
-      cutting per-worker memory from ~500MB to ~50MB overhead.
+      cutting per-worker memory from ~500 MB to ~50 MB overhead.
     - worker_class = "sync" → PyTorch/transformers use C-level threads
       internally; gevent monkey-patching causes deadlocks with ML workloads.
-      sync workers are correct for CPU-bound inference.
-    - workers = 4 → 2×CPU for CPU-bound NLP tasks.  Override via
-      WEB_CONCURRENCY env var for auto-scaling.
+      sync workers are correct and required for CPU-bound inference.
+      NOTE: the `threads = 2` setting below has no effect with sync workers
+      (it only applies to gthread workers) and is kept for documentation.
+    - workers = 2 (default) → ML workloads are memory-heavy; cap at 2 for
+      VPS deployments. Override via WEB_CONCURRENCY env var.
 """
 
 import os

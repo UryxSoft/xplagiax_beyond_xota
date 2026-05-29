@@ -123,9 +123,11 @@ def analyze_document_task(self, payload):
         # Runs after EVERY task completion or failure — prevents memory collapse
         # across long-running workers that process hundreds of documents.
 
-        # 1. Free Python-managed objects (circular refs, dead tensors, etc.)
-        collected = gc.collect()
-        logger.debug("gc.collect() freed %d objects after task", collected)
+        # 1. Free Python-managed objects — only pays off for large texts
+        # (GC full sweep on small docs adds latency without significant benefit)
+        if len(text) > 10_000:
+            collected = gc.collect()
+            logger.debug("gc.collect() freed %d objects after task", collected)
 
         # 2. Clear PyTorch CUDA cache (no-op on CPU-only, safe to always call)
         try:

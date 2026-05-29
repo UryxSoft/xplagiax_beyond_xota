@@ -13,19 +13,12 @@ Architecture:
 
 import re
 import logging
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-
-# spaCy is optional — graceful fallback to rule-based segmentation
-try:
-    import spacy as _spacy
-    _SPACY_AVAILABLE = True
-except ImportError:
-    _spacy = None
-    _SPACY_AVAILABLE = False
 
 
 # ─────────────────────────────────────────────
@@ -218,16 +211,6 @@ class TextSegmenter:
 
     def __init__(self):
         self.patterns = CitationPatterns()
-        self._nlp = None
-        if _SPACY_AVAILABLE:
-            for model in ("es_core_news_sm", "en_core_web_sm"):
-                try:
-                    self._nlp = _spacy.load(model)
-                    break
-                except OSError:
-                    continue
-            if self._nlp is None:
-                logger.warning("spaCy models not found. Using rule-based segmentation only.")
 
     def segment(self, text: str) -> tuple:
         """
@@ -603,23 +586,65 @@ class CitationDetector:
         """
         Links inline citations to bibliography entries.
         Returns (orphan_citations, uncited_bibliography).
+
+        Complexity: O(n+m) via pre-indexed lookups on the common path;
+        falls back to O(m) substring scan only for fuzzy author matches.
         """
+        # Pre-index bibliography
+        _by_number: dict = {}
+        _by_lastname: dict = defaultdict(list)  # normalized_lastname -> [entry]
+        for entry in bibliography:
+            if entry.number is not None:
+                _by_number[entry.number] = entry
+            if entry.authors:
+                ln = self._normalize_name(entry.authors[0].split(',')[0])
+                _by_lastname[ln].append(entry)
+
+        def _mark_zone(citation, entry):
+            for zone in zones:
+                if zone.start_pos <= citation.start_pos < zone.end_pos:
+                    if entry not in zone.linked_bibliography:
+                        zone.linked_bibliography.append(entry)
+                    zone.has_valid_citation = True
+
+        def _find_entry(citation):
+            # Fast path: numeric (IEEE / Vancouver)
+            if citation.number is not None:
+                return _by_number.get(citation.number)
+
+            if not citation.author:
+                return None
+
+            cite_ln = self._normalize_name(
+                citation.author.split(',')[0].split('&')[0].strip()
+            )
+
+            # Fast path: exact lastname match
+            for entry in _by_lastname.get(cite_ln, []):
+                if not citation.year or not entry.year or citation.year == entry.year:
+                    return entry
+
+            # Slow path: substring lastname match (rare — only when exact fails)
+            for entry in bibliography:
+                if not entry.authors:
+                    continue
+                entry_ln = self._normalize_name(entry.authors[0].split(',')[0])
+                if cite_ln in entry_ln or entry_ln in cite_ln:
+                    if not citation.year or not entry.year or citation.year == entry.year:
+                        return entry
+
+            return None
+
         linked_bib_keys = set()
         orphan_citations = []
 
         for citation in citations:
-            matched = False
+            found = _find_entry(citation)
+            matched = found is not None
 
-            for entry in bibliography:
-                if self._citation_matches_entry(citation, entry):
-                    for zone in zones:
-                        if zone.start_pos <= citation.start_pos < zone.end_pos:
-                            if entry not in zone.linked_bibliography:
-                                zone.linked_bibliography.append(entry)
-                            zone.has_valid_citation = True
-                    linked_bib_keys.add(entry.key)
-                    matched = True
-                    break
+            if found is not None:
+                _mark_zone(citation, found)
+                linked_bib_keys.add(found.key)
 
             # IEEE/Chicago without bibliography → citation alone is sufficient
             if not matched and citation.style in (CitationStyle.IEEE, CitationStyle.CHICAGO):
@@ -703,5 +728,4 @@ class CitationDetector:
         styles = [c.style for c in citations if c.style != CitationStyle.UNKNOWN]
         if not styles:
             return 0.0
-        most_common = max(set(styles), key=styles.count)
-        return styles.count(most_common) / len(styles)
+        return Counter(styles).most_common(1)[0][1] / len(styles)

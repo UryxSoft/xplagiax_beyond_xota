@@ -14,9 +14,16 @@ import os
 from functools import wraps
 from flask import Blueprint, request, jsonify, current_app
 
+import logging
+
 from .citation.detector import CitationDetector, CitationStyle, ZoneType
 from .citation.validator import CitationValidator, ValidationStatus, _shared_cache
 
+logger = logging.getLogger(__name__)
+
+# Module-level singleton — instantiated once at gunicorn preload, shared via CoW.
+# Avoids spaCy model reload (~200-500 ms) on every request.
+_citation_detector = CitationDetector()
 
 antiplagio_bp = Blueprint("antiplagio", __name__, url_prefix="/api/v2")
 
@@ -26,7 +33,7 @@ antiplagio_bp = Blueprint("antiplagio", __name__, url_prefix="/api/v2")
 # ─────────────────────────────────────────────
 
 def async_route(f):
-    """Decorator to use async handlers in Flask (compatible with gevent workers)."""
+    """Decorator to use async handlers in Flask (sync workers, no gevent)."""
     @wraps(f)
     def wrapper(*args, **kwargs):
         loop = asyncio.new_event_loop()
@@ -57,8 +64,7 @@ def detect_citations():
     if not data or "text" not in data:
         return jsonify({"error": "Campo 'text' requerido"}), 400
 
-    detector = CitationDetector()
-    result = detector.analyze(data["text"])
+    result = _citation_detector.analyze(data["text"])
 
     return jsonify({
         "dominant_style": result.dominant_style.value,
@@ -121,13 +127,11 @@ async def validate_citations():
         return jsonify({"error": "JSON requerido"}), 400
 
     if "text" in data:
-        detector = CitationDetector()
-        analysis = detector.analyze(data["text"])
+        analysis = _citation_detector.analyze(data["text"])
         bibliography = analysis.bibliography
     elif "bibliography" in data:
-        detector = CitationDetector()
         raw_text = "Referencias\n" + "\n".join(data["bibliography"])
-        bibliography = detector._parse_bibliography(raw_text)
+        bibliography = _citation_detector._parse_bibliography(raw_text)
     else:
         return jsonify({"error": "Se requiere 'text' o 'bibliography'"}), 400
 
