@@ -26,7 +26,7 @@ bind = os.getenv("GUNICORN_BIND", "0.0.0.0:5006")
 # Cap at 2 for memory-constrained VPS. Override via WEB_CONCURRENCY env var.
 workers = int(os.getenv("WEB_CONCURRENCY",
                         min(multiprocessing.cpu_count(), 2)))
-worker_class = "sync"
+worker_class = "gthread"
 threads = 2
 
 # ── CRITICAL: Enable preload for CoW memory sharing ──────────────

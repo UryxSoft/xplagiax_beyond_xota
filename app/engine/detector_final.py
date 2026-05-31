@@ -5,6 +5,10 @@ import os
 import warnings
 import logging
 
+# Inference-only service — disable autograd globally to eliminate gradient
+# tensor allocation overhead on every forward pass (~50-150 MB per worker).
+torch.set_grad_enabled(False)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 import re

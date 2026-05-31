@@ -1117,32 +1117,64 @@ docker run -d \
   redis:7-alpine \
   sh -c 'if [ -n "$REDIS_PASSWORD" ]; then redis-server --requirepass "$REDIS_PASSWORD"; else redis-server; fi'
 
-# 3. Stop any existing container
+# 3. Rebuild the image with all fixes applied
+docker build -t xplagiax_xota:latest .
+
+# 4. Stop any existing container
 docker stop xplagiax-xota 2>/dev/null || true
 docker rm   xplagiax-xota 2>/dev/null || true
 
-# 4. Run the service
+# 5. Run the service
 docker run -d \
   --name xplagiax-xota \
   --network xplagiax-net \
   --restart unless-stopped \
   -p 5006:5006 \
+  --shm-size=4g \
+  --memory=4g \
+  --memory-swap=4g \
   -e WEB_CONCURRENCY=2 \
   -e FLASK_ENV=production \
   -e SECRET_KEY=your-secret-key \
   -e API_KEY=your-api-key \
-  -e REDIS_URL="redis://:your-redis-password@redis:6379" \
-  -e REDIS_PASSWORD=your-redis-password \
-  -e REDIS_MAX_CONNECTIONS=10 \
-  -e CELERY_BROKER_URL="redis://:your-redis-password@redis:6379/0" \
-  -e CELERY_RESULT_BACKEND="redis://:your-redis-password@redis:6379/1" \
+  -e REDIS_URL="redis://redis:6379" \
+  -e CELERY_BROKER_URL="redis://redis:6379/0" \
+  -e CELERY_RESULT_BACKEND="redis://redis:6379/1" \
   -e CROSSREF_EMAIL="your@institution.edu" \
-  -e LOG_LEVEL=info \
+  -e GUNICORN_SPAWN_CELERY=1 \
   xplagiax_xota:latest
 
-# 5. Verify health
+# 6. Verify startup — should show sync workers + Celery forked, no shm errors
+docker logs xplagiax-xota 2>&1 | grep -E "worker:|Celery|shm|sync|Error"
+
+# 7. Verify health
 curl http://localhost:5006/health
 curl http://localhost:5006/ready
+```
+
+**Flags críticos que no pueden faltar:**
+
+| Flag | Por qué es obligatorio |
+|---|---|
+| `--shm-size=4g` | Docker asigna 64 MB a `/dev/shm` por defecto. `m.share_memory()` necesita ~1.7 GB para los 3 modelos. Sin este flag, el CoW no funciona y cada worker duplica los modelos en RAM. |
+| `--memory=4g` | Sin techo de RAM, el OOM killer de Linux puede matar el proceso sin aviso. Con el límite, Docker reinicia el contenedor de forma predecible. |
+| `--memory-swap=4g` | Igualar a `--memory` deshabilita el swap — falla rápido y predecible en vez de degradarse silenciosamente. |
+| `GUNICORN_SPAWN_CELERY=1` | Forkea el worker de Celery desde el master de gunicorn después de `preload_app`. El worker hereda los modelos vía CoW sin cargarlos de nuevo. Sin este flag, `analyze_document_async` queda en `PENDING` para siempre. |
+
+**Verificación post-arranque:**
+
+```bash
+# Worker class debe ser "sync", no "gthread"
+docker logs xplagiax-xota 2>&1 | grep "Using worker"
+# → [INFO] Using worker: sync
+
+# Celery debe estar forkeado del master
+docker logs xplagiax-xota 2>&1 | grep "Celery"
+# → Celery worker forkeado del master (CoW activo): PID 91
+
+# No debe haber errores de shared memory
+docker logs xplagiax-xota 2>&1 | grep "shm\|No space"
+# → (sin output)
 ```
 
 #### Run — with mounted models (avoids embedding ~1.7 GB in the image)
