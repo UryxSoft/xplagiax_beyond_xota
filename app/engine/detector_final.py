@@ -48,7 +48,12 @@ def _load_model(weight_path):
     # Without this, the first inference in each worker copies all ~570 MB of
     # model weights into private pages, multiplying RSS by the worker count.
     if device.type == "cpu":
-        m.share_memory()
+        try:
+            m.share_memory()
+        except Exception as _shm_err:
+            # /dev/shm too small (Docker default 64 MB). Model stays in anon
+            # CoW memory — perfectly fine for gthread workers and preload_app.
+            logger.debug("share_memory() skipped: %s", _shm_err)
     return m
 
 model_1 = _load_model(model1_path)
