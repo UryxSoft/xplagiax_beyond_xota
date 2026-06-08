@@ -102,7 +102,7 @@ def _celery_watchdog(server):
     recycle). Uses <1 MB RAM. Prevents tasks from piling up in PENDING state.
     """
     while True:
-        threading.Event().wait(30)
+        threading.Event().wait(10)
         global _celery_process
         if _celery_process is not None and not _celery_process.is_alive():
             server.log.warning(

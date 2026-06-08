@@ -24,6 +24,10 @@ def make_celery():
     celery.conf.task_acks_late = True
     # Prefetch 1 task at a time (important for memory-heavy ML tasks)
     celery.conf.worker_prefetch_multiplier = 1
+    # Re-queue unacknowledged tasks after 360s (slightly > time_limit=300).
+    # Default is 3600s (1 hour) — tasks from a dead worker would stay
+    # PENDING for up to 1 hour before being retried.
+    celery.conf.broker_transport_options = {'visibility_timeout': 360}
 
     # TaskBase override to ensure Flask context is active during task execution
     class ContextTask(celery.Task):

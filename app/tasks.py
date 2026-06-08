@@ -55,6 +55,10 @@ def analyze_document_task(self, payload):
     text = payload.get("text", "")
     plugins_requested = payload.get("plugins", ["ai_detection"])
 
+    # Mark as STARTED immediately so clients can distinguish "queued" from
+    # "processing". Without this, the task stays PENDING until it finishes.
+    self.update_state(state='STARTED', meta={'plugins': plugins_requested})
+
     registry = current_app.config["PLUGIN_REGISTRY"]
     timeout = current_app.config.get("PLUGIN_TIMEOUT", 120)
 

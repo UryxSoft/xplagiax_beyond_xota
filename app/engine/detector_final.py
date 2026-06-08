@@ -12,6 +12,7 @@ torch.set_grad_enabled(False)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 import re
+import nltk
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -621,6 +622,81 @@ _FAST_CACHE_TTL: float = 300.0   # 5 minutes — covers same-request multi-plugi
 _FAST_CACHE_MAX: int = 20        # keep memory bounded; LRU eviction
 
 
+def _split_sentences_into_chunks(
+    text: str, max_tokens: int
+) -> Tuple[List[List[int]], List[str]]:
+    """
+    Split text into token-ID chunks respecting paragraph and sentence boundaries.
+
+    Strategy:
+      1. Split by paragraphs (\\n\\n then \\n) so human/AI sections in different
+         paragraphs never bleed into the same chunk.
+      2. Split each paragraph into sentences with NLTK punkt so long paragraphs
+         with internal mixing are separated at sentence boundaries.
+      3. Group sentences into chunks up to max_tokens; sentences that exceed
+         max_tokens alone are split at token boundaries as a last resort.
+
+    Returns (chunk_id_seqs, chunk_texts) — same types consumed by analyze_fast.
+    """
+    paragraphs: List[str] = []
+    for block in text.split('\n\n'):
+        for line in block.split('\n'):
+            line = line.strip()
+            if line:
+                paragraphs.append(line)
+    if not paragraphs:
+        paragraphs = [text.strip()]
+
+    all_sentences: List[str] = []
+    for para in paragraphs:
+        try:
+            all_sentences.extend(nltk.sent_tokenize(para))
+        except Exception:
+            all_sentences.append(para)
+
+    # Estimate per-sentence token counts for grouping decisions only
+    sent_lens = [
+        len(tokenizer.encode(s, add_special_tokens=False))
+        for s in all_sentences
+    ]
+
+    # Build text-based groups — encode each GROUP as a unit below so that
+    # cross-sentence BPE tokenization is correct (concatenating per-sentence
+    # IDs introduces boundary artifacts where tokens at joins differ).
+    chunk_texts: List[str] = []
+    cur_sents: List[str] = []
+    cur_len: int = 0
+
+    for sent_text, sent_len in zip(all_sentences, sent_lens):
+        if not sent_len:
+            continue
+        if sent_len > max_tokens:
+            if cur_sents:
+                chunk_texts.append(' '.join(cur_sents))
+                cur_sents, cur_len = [], 0
+            ids = tokenizer.encode(sent_text, add_special_tokens=False)
+            for i in range(0, len(ids), max_tokens):
+                sub = ids[i:i + max_tokens]
+                chunk_texts.append(tokenizer.decode(sub, skip_special_tokens=True))
+        elif cur_len + sent_len > max_tokens:
+            chunk_texts.append(' '.join(cur_sents))
+            cur_sents, cur_len = [sent_text], sent_len
+        else:
+            cur_sents.append(sent_text)
+            cur_len += sent_len
+
+    if cur_sents:
+        chunk_texts.append(' '.join(cur_sents))
+
+    # Encode each text chunk as a unit — preserves cross-sentence tokenization
+    chunk_id_seqs: List[List[int]] = [
+        tokenizer.encode(ct, add_special_tokens=False)
+        for ct in chunk_texts
+    ]
+
+    return chunk_id_seqs, chunk_texts
+
+
 @torch.inference_mode()
 def analyze_fast(text: str) -> dict:
     """
@@ -644,6 +720,8 @@ def analyze_fast(text: str) -> dict:
     """
     if not text.strip():
         return {"error": "El documento está vacío."}
+
+    text = clean_text(text)
 
     # Cache check — avoids re-running the ensemble for the same text
     _text_hash = _hashlib.sha256(text.encode()).hexdigest()
@@ -669,33 +747,22 @@ def analyze_fast(text: str) -> dict:
 
     BATCH_SIZE = 12
 
-    # 1. Tokenize entire text once (no per-fragment loop)
-    all_ids = tokenizer.encode(text, add_special_tokens=False, truncation=False)
-    if not all_ids:
+    # 1. Paragraph + sentence-aware splitting
+    chunk_id_seqs, chunks_text = _split_sentences_into_chunks(text, max_tokens)
+    if not chunk_id_seqs:
         return {"error": "No se pudo tokenizar el texto."}
-
-    # 2. Split at token boundaries
-    chunk_id_seqs = [
-        all_ids[i: i + max_tokens]
-        for i in range(0, len(all_ids), max_tokens)
-    ]
 
     # Merge orphan trailing chunk (< 50 tokens) into previous
     if len(chunk_id_seqs) > 1 and len(chunk_id_seqs[-1]) < 50:
         chunk_id_seqs[-2] += chunk_id_seqs.pop()
+        chunks_text[-2] += " " + chunks_text.pop()
 
     chunk_lengths = [len(ids) for ids in chunk_id_seqs]
 
-    # 3. Batch inference directly on token IDs — eliminates decode→re-encode round-trip
+    # 2. Batch inference directly on token IDs
     all_pcts: List[Tuple[float, float, Optional[str]]] = []
     for i in range(0, len(chunk_id_seqs), BATCH_SIZE):
         all_pcts.extend(_classify_batch_from_ids(chunk_id_seqs[i: i + BATCH_SIZE]))
-
-    # 4. Decode chunk text for segment labels (deferred until after inference)
-    chunks_text = [
-        tokenizer.decode(ids, skip_special_tokens=True)
-        for ids in chunk_id_seqs
-    ]
 
     # 5. Weighted summary + per-segment results
     segments = []
