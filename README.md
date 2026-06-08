@@ -16,18 +16,20 @@ Client
     │  POST /api/v2/citations/validate  {"text": "..."}
     ▼
 ┌────────────────────────────────────────────────────────────────┐
-│  Gunicorn (preload_app=True + sync workers)                    │
+│  Gunicorn (preload_app=True + gthread workers)                 │
 │                                                                │
 │  Master Process                                                │
 │  ├── ModernBERT ensemble loaded ONCE at module level           │
+│  ├── share_memory() → models in /dev/shm (shared across forks) │
 │  ├── CitationDetector singleton loaded ONCE (CoW-safe)         │
 │  ├── PluginRegistry auto-discovers all plugins                 │
 │  └── create_app() called once                                  │
-│                  │ fork (Linux CoW)                            │
-│  ┌───────────────▼──┐  ┌──────────────────┐                   │
-│  │    Worker 1       │  │    Worker 2  ...  │                  │
-│  │  ~50 MB overhead  │  │  ~50 MB overhead  │                  │
-│  └───────────────────┘  └───────────────────┘                  │
+│                  │ fork (Linux CoW + POSIX shm)               │
+│  ┌───────────────▼──────┐  ┌──────────────────────┐           │
+│  │  gthread Worker 1     │  │  Celery Worker        │           │
+│  │  2 threads, ~150 MB   │  │  2 threads, ~150 MB   │           │
+│  │  models: shared shm   │  │  models: shared shm   │           │
+│  └───────────────────────┘  └───────────────────────┘          │
 │                                                                │
 │  Redis (optional)                                              │
 │  ├── Rate limit counters (Flask-Limiter)                       │
@@ -41,16 +43,20 @@ Client
 | Decision | Rationale |
 |---|---|
 | `preload_app = True` | Models loaded once in master, shared across workers via CoW |
-| Sync worker class | Stable under CPU-bound ML inference; no gevent GIL interaction |
+| `gthread` worker class | Threads share master's memory directly — no model duplication across workers |
+| `--shm-size=2g` (Docker) | Gives `/dev/shm` enough space for `share_memory()` to map ~1.8 GB of model weights into POSIX shared memory |
 | `OMP_NUM_THREADS=1` | Prevents torch/numpy from spawning per-worker thread explosions |
 | `local_files_only=True` | No HuggingFace network calls on startup — uses local cache |
 | Plugin auto-discovery | Drop a file in `app/plugins/`, restart — zero core changes needed |
 | Multi-stage Docker build | Builder has gcc/dev headers; runtime image is lean |
 | Non-root container user | UID 1000, K8s security best practice |
-| `m.share_memory()` on models | POSIX shared memory prevents CoW page faults across workers |
+| `m.share_memory()` wrapped in try/except | Silently falls back to anon CoW if `/dev/shm` is too small — prevents import failure |
+| Celery `--pool=threads --concurrency=2` | 2 concurrent analyses in the same process — shares models, no memory duplication, PyTorch releases GIL during inference |
+| Celery `visibility_timeout=360s` | Tasks from a dead worker are re-queued after 6 min (default was 1 hour) |
+| Celery watchdog every 10s | Detects dead Celery process and restarts within 10s (was 30s) |
 | CitationDetector module singleton | Instantiated at import time, shared across all workers via CoW |
 | Result cache (sha256 keyed) | Same text + same plugins = 0ms from Redis cache, no re-inference |
-| `analyze_fast()` everywhere | Single-pass tokenization with token-boundary splits; 2–12× faster than chunked inference |
+| `analyze_fast()` paragraph+sentence-aware | Splits at paragraph/sentence boundaries before token limits — prevents human/AI content bleeding across chunk boundaries |
 
 ---
 
@@ -1130,10 +1136,10 @@ docker run -d \
   --network xplagiax-net \
   --restart unless-stopped \
   -p 5006:5006 \
-  --shm-size=4g \
-  --memory=4g \
-  --memory-swap=4g \
-  -e WEB_CONCURRENCY=2 \
+  --memory=6g \
+  --memory-swap=6g \
+  --shm-size=2g \
+  -e WEB_CONCURRENCY=1 \
   -e FLASK_ENV=production \
   -e SECRET_KEY=your-secret-key \
   -e API_KEY=your-api-key \
@@ -1144,8 +1150,8 @@ docker run -d \
   -e GUNICORN_SPAWN_CELERY=1 \
   xplagiax_xota:latest
 
-# 6. Verify startup — should show sync workers + Celery forked, no shm errors
-docker logs xplagiax-xota 2>&1 | grep -E "worker:|Celery|shm|sync|Error"
+# 6. Verify startup — gthread workers + Celery forked, Celery ready
+docker logs xplagiax-xota 2>&1 | grep -E "worker:|Celery|ready|Error"
 
 # 7. Verify health
 curl http://localhost:5006/health
@@ -1156,25 +1162,26 @@ curl http://localhost:5006/ready
 
 | Flag | Por qué es obligatorio |
 |---|---|
-| `--shm-size=4g` | Docker asigna 64 MB a `/dev/shm` por defecto. `m.share_memory()` necesita ~1.7 GB para los 3 modelos. Sin este flag, el CoW no funciona y cada worker duplica los modelos en RAM. |
-| `--memory=4g` | Sin techo de RAM, el OOM killer de Linux puede matar el proceso sin aviso. Con el límite, Docker reinicia el contenedor de forma predecible. |
-| `--memory-swap=4g` | Igualar a `--memory` deshabilita el swap — falla rápido y predecible en vez de degradarse silenciosamente. |
-| `GUNICORN_SPAWN_CELERY=1` | Forkea el worker de Celery desde el master de gunicorn después de `preload_app`. El worker hereda los modelos vía CoW sin cargarlos de nuevo. Sin este flag, `analyze_document_async` queda en `PENDING` para siempre. |
+| `--shm-size=2g` | Docker asigna 64 MB a `/dev/shm` por defecto. `m.share_memory()` necesita ~1.8 GB para los 3 modelos. Sin este flag, el módulo falla al importar y los modelos no se cargan. |
+| `--memory=6g` | La app necesita ~4.4 GB en carga inicial (2 GB shmem + 2 GB anon). Sin límite suficiente, el OOM killer mata gunicorn antes de que carguen los modelos. |
+| `--memory-swap=6g` | Igualar a `--memory` deshabilita el swap — falla rápido y predecible en vez de degradarse silenciosamente. |
+| `GUNICORN_SPAWN_CELERY=1` | Forkea el worker de Celery desde el master de gunicorn después de `preload_app`. El worker hereda los modelos vía POSIX shared memory sin cargarlos de nuevo. Sin este flag, `analyze_document_async` queda en `PENDING` indefinidamente. |
+| `WEB_CONCURRENCY=1` | Con gthread (2 threads por worker) 1 worker es suficiente para manejar requests concurrentes. Subir a 2 añade ~600 MB de RAM para el segundo worker. |
 
 **Verificación post-arranque:**
 
 ```bash
-# Worker class debe ser "sync", no "gthread"
+# Worker class debe ser "gthread"
 docker logs xplagiax-xota 2>&1 | grep "Using worker"
-# → [INFO] Using worker: sync
+# → [INFO] Using worker: gthread
 
-# Celery debe estar forkeado del master
+# Celery debe estar forkeado del master con 2 threads
 docker logs xplagiax-xota 2>&1 | grep "Celery"
 # → Celery worker forkeado del master (CoW activo): PID 91
+# → celery@hostname ready.
 
-# No debe haber errores de shared memory
-docker logs xplagiax-xota 2>&1 | grep "shm\|No space"
-# → (sin output)
+# RAM usada por el contenedor (estable en ~4.4 GB)
+docker stats --no-stream xplagiax-xota
 ```
 
 #### Run — with mounted models (avoids embedding ~1.7 GB in the image)
@@ -1519,6 +1526,74 @@ Deep forensic analysis of why the container consumed **2.7 GB at baseline** and 
 | After first async request (all 3 processes touched) | +5.1 GB (CoW violation × 3 workers) | ~+50 MB (shared memory) |
 | Redis after 100 async requests (1-hour window) | +500 MB–1 GB | ~+10–50 MB |
 | **Steady-state under load** | **~8–10 GB+** | **~3–3.5 GB** |
+
+---
+
+## Fixes & Improvements (June 2026)
+
+### OOM & RAM Fixes
+
+| ID | Problema | Fix |
+|---|---|---|
+| M-01 | `share_memory()` crasheaba el import cuando `/dev/shm` < 1.8 GB (Docker default 64 MB), dejando modelos en `None` | Wrapped en `try/except` — si falla, los modelos cargan en anon CoW. Con `--shm-size=2g` funciona correctamente |
+| M-02 | Worker class `sync` → cada worker forkeado copiaba 1.8 GB de modelos vía CoW roto (Python refcounting). Con 3 procesos = 5.4 GB | Cambiado a `gthread` — 1 proceso con 2 threads, comparten el mismo espacio de memoria |
+| M-03 | Límite de RAM en 4g/5g causaba OOM antes de que cargaran los modelos (pico inicial = 4.4 GB) | Subido a `--memory=6g` para dar margen durante la carga inicial |
+
+### Celery / Async Task Fixes
+
+| ID | Problema | Fix |
+|---|---|---|
+| C-01 | Tasks quedaban en `PENDING` hasta 1 hora cuando el worker moría — `visibility_timeout` de Redis era 3600s | Reducido a `360s` en `celery_app.py` — tasks re-encoladas en 6 min |
+| C-02 | Cliente no podía distinguir "task en cola" de "task procesándose" — ambos devolvían `PENDING` | `self.update_state(state='STARTED')` al inicio de cada task |
+| C-03 | `SoftTimeLimitExceeded` no capturado — con `--pool=threads` la excepción mataba el thread sin retornar error limpio | Añadido `except SoftTimeLimitExceeded` en `tasks.py` con respuesta de error estructurada |
+| C-04 | Watchdog del Celery worker chequeaba cada 30s — hasta 30s de tasks `PENDING` tras muerte del worker | Reducido a 10s en `gunicorn.conf.py` |
+| C-05 | `--pool=solo --concurrency=1` = 1 análisis a la vez, cuello de botella en servidores multi-core | Cambiado a `--pool=threads --concurrency=2` — 2 análisis simultáneos, PyTorch libera GIL durante inferencia C++ |
+
+### Segmentación / Precisión del Análisis
+
+| ID | Problema | Fix |
+|---|---|---|
+| A-01 | `analyze_fast()` dividía el texto por límites de tokens puros — el texto humano y el IA del mismo documento caían en el mismo chunk, resultado = 100% IA aunque el texto fuera mixto | Chunking ahora respeta párrafos (`\n\n`, `\n`) y oraciones (NLTK punkt) antes de aplicar límite de tokens |
+| A-02 | Las oraciones se tokenizaban individualmente y se concatenaban sus IDs — BPE tokenización incorrecta en las uniones | Cada chunk de texto se tokeniza como unidad completa, preservando fidelidad cross-sentence |
+| A-03 | `clean_text()` no se aplicaba en el path de `analyze_fast()` — espacios dobles y espacios antes de puntuación no normalizados | `clean_text()` aplicado al inicio de `analyze_fast()` antes del procesamiento |
+
+### Docker Run Correcto (Junio 2026)
+
+```bash
+docker stop xplagiax-xota && docker rm xplagiax-xota
+docker build -t xplagiax_xota:latest .
+
+docker run -d \
+  --name xplagiax-xota \
+  --network xplagiax-net \
+  --restart unless-stopped \
+  -p 5006:5006 \
+  --memory=6g \
+  --memory-swap=6g \
+  --shm-size=2g \
+  -e WEB_CONCURRENCY=1 \
+  -e FLASK_ENV=production \
+  -e SECRET_KEY="your-secret-key" \
+  -e API_KEY="your-api-key" \
+  -e REDIS_URL="redis://redis:6379" \
+  -e CELERY_BROKER_URL="redis://redis:6379/0" \
+  -e CELERY_RESULT_BACKEND="redis://redis:6379/1" \
+  -e CROSSREF_EMAIL="your@institution.edu" \
+  -e GUNICORN_SPAWN_CELERY=1 \
+  xplagiax_xota:latest
+```
+
+**Presupuesto de RAM con esta configuración (servidor 15 GB):**
+
+| Proceso | RAM |
+|---|---|
+| Modelos ModernBERT en `/dev/shm` (compartidos) | ~2.0 GB |
+| Master + gthread worker (anon: Python, Flask, libs) | ~1.4 GB |
+| Celery worker con 2 threads (anon) | ~0.7 GB |
+| Activaciones durante inferencia (pico) | ~0.3 GB |
+| **Total contenedor** | **~4.4 GB / 6 GB límite** |
+| Otros contenedores (MySQL, Redis, SeaweedFS, etc.) | ~1.3 GB |
+| **Disponible para el SO** | **~9 GB** |
 
 ---
 

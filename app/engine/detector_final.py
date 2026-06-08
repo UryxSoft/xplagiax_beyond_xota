@@ -12,7 +12,6 @@ torch.set_grad_enabled(False)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger = logging.getLogger(__name__)
 import re
-import nltk
 from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -622,108 +621,28 @@ _FAST_CACHE_TTL: float = 300.0   # 5 minutes — covers same-request multi-plugi
 _FAST_CACHE_MAX: int = 20        # keep memory bounded; LRU eviction
 
 
-def _split_sentences_into_chunks(
-    text: str, max_tokens: int
-) -> Tuple[List[List[int]], List[str]]:
-    """
-    Split text into token-ID chunks respecting paragraph and sentence boundaries.
-
-    Strategy:
-      1. Split by paragraphs (\\n\\n then \\n) so human/AI sections in different
-         paragraphs never bleed into the same chunk.
-      2. Split each paragraph into sentences with NLTK punkt so long paragraphs
-         with internal mixing are separated at sentence boundaries.
-      3. Group sentences into chunks up to max_tokens; sentences that exceed
-         max_tokens alone are split at token boundaries as a last resort.
-
-    Returns (chunk_id_seqs, chunk_texts) — same types consumed by analyze_fast.
-    """
-    paragraphs: List[str] = []
-    for block in text.split('\n\n'):
-        for line in block.split('\n'):
-            line = line.strip()
-            if line:
-                paragraphs.append(line)
-    if not paragraphs:
-        paragraphs = [text.strip()]
-
-    all_sentences: List[str] = []
-    for para in paragraphs:
-        try:
-            all_sentences.extend(nltk.sent_tokenize(para))
-        except Exception:
-            all_sentences.append(para)
-
-    # Estimate per-sentence token counts for grouping decisions only
-    sent_lens = [
-        len(tokenizer.encode(s, add_special_tokens=False))
-        for s in all_sentences
-    ]
-
-    # Build text-based groups — encode each GROUP as a unit below so that
-    # cross-sentence BPE tokenization is correct (concatenating per-sentence
-    # IDs introduces boundary artifacts where tokens at joins differ).
-    chunk_texts: List[str] = []
-    cur_sents: List[str] = []
-    cur_len: int = 0
-
-    for sent_text, sent_len in zip(all_sentences, sent_lens):
-        if not sent_len:
-            continue
-        if sent_len > max_tokens:
-            if cur_sents:
-                chunk_texts.append(' '.join(cur_sents))
-                cur_sents, cur_len = [], 0
-            ids = tokenizer.encode(sent_text, add_special_tokens=False)
-            for i in range(0, len(ids), max_tokens):
-                sub = ids[i:i + max_tokens]
-                chunk_texts.append(tokenizer.decode(sub, skip_special_tokens=True))
-        elif cur_len + sent_len > max_tokens:
-            chunk_texts.append(' '.join(cur_sents))
-            cur_sents, cur_len = [sent_text], sent_len
-        else:
-            cur_sents.append(sent_text)
-            cur_len += sent_len
-
-    if cur_sents:
-        chunk_texts.append(' '.join(cur_sents))
-
-    # Encode each text chunk as a unit — preserves cross-sentence tokenization
-    chunk_id_seqs: List[List[int]] = [
-        tokenizer.encode(ct, add_special_tokens=False)
-        for ct in chunk_texts
-    ]
-
-    return chunk_id_seqs, chunk_texts
-
-
 @torch.inference_mode()
 def analyze_fast(text: str) -> dict:
     """
-    Speed-optimized document analysis for any length without timeout risk.
+    Paragraph-aware document analysis matching the reference classify_text() pipeline.
 
-    Improvements over analyze_long_documentsd_:
-      1. Single tokenizer.encode() call for the full text — no per-fragment
-         encode loop. Eliminates 20-100 tokenizer calls on large documents.
-      2. Adaptive max_tokens based on word count:
-           < 800 words  → 256 tokens  (fine-grained, fast)
-           < 2500 words → 512 tokens  (standard accuracy)
-           < 6000 words → 768 tokens  (fewer batches)
-           >= 6000 words → 1024 tokens (minimal batches, no timeout)
-      3. BATCH_SIZE=12 — more sequences per forward pass, fewer model calls.
-      4. Token-boundary splitting — cleaner chunks, no paragraph fragmentation.
-      5. Result cache (TTL=5min) — multi-plugin requests skip repeated inference.
+    Each paragraph (split at \\n\\n then \\n) is classified as an independent
+    unit — identical to how the reference runs on a single text:
+      1. clean_text() normalization
+      2. tokenizer(segment, truncation=True) — one forward pass per segment
+      3. 3-model softmax average → human_pct / ai_pct
 
-    Expected CPU time (3-model ensemble, ~2.5s per batch call):
-        500 w →  ~2.5s   1000 w →  ~2.5s   2000 w →  ~2.5s
-       5000 w →  ~2.5s  10000 w →  ~5.0s  50000 w → ~12.5s
+    This prevents human and AI sections from bleeding into the same chunk,
+    which occurred with the previous token-boundary splitting approach.
+
+    Result cache: TTL=5min, 20-entry LRU — same-text repeated calls cost 0ms.
     """
     if not text.strip():
         return {"error": "El documento está vacío."}
 
     text = clean_text(text)
 
-    # Cache check — avoids re-running the ensemble for the same text
+    # Cache check
     _text_hash = _hashlib.sha256(text.encode()).hexdigest()
     _now = _time.monotonic()
     with _FAST_CACHE_LOCK:
@@ -734,47 +653,43 @@ def analyze_fast(text: str) -> dict:
             _oldest = min(_FAST_CACHE, key=lambda k: _FAST_CACHE[k][1])
             del _FAST_CACHE[_oldest]
 
-    # Adaptive chunk size
-    word_count = len(text.split())
-    if word_count < 800:
-        max_tokens = 256
-    elif word_count < 2500:
-        max_tokens = 512
-    elif word_count < 6000:
-        max_tokens = 768
-    else:
-        max_tokens = 1024
+    # 1. Split at paragraph boundaries — each line/paragraph is a segment
+    segments_text: List[str] = []
+    for block in text.split('\n\n'):
+        for line in block.split('\n'):
+            line = line.strip()
+            if line:
+                segments_text.append(line)
+    if not segments_text:
+        segments_text = [text.strip()]
 
     BATCH_SIZE = 12
+    # Reserve 2 slots for CLS/SEP — matches tokenizer(truncation=True) behavior
+    max_content = tokenizer.model_max_length - 2
 
-    # 1. Paragraph + sentence-aware splitting
-    chunk_id_seqs, chunks_text = _split_sentences_into_chunks(text, max_tokens)
-    if not chunk_id_seqs:
-        return {"error": "No se pudo tokenizar el texto."}
+    # 2. Tokenize each segment as an independent unit (truncation=True = reference behavior)
+    segment_id_seqs: List[List[int]] = [
+        tokenizer.encode(seg, add_special_tokens=False, truncation=True, max_length=max_content)
+        for seg in segments_text
+    ]
 
-    # Merge orphan trailing chunk (< 50 tokens) into previous
-    if len(chunk_id_seqs) > 1 and len(chunk_id_seqs[-1]) < 50:
-        chunk_id_seqs[-2] += chunk_id_seqs.pop()
-        chunks_text[-2] += " " + chunks_text.pop()
-
-    chunk_lengths = [len(ids) for ids in chunk_id_seqs]
-
-    # 2. Batch inference directly on token IDs
+    # 3. Ensemble inference — same 3-model softmax average as reference classify_text()
     all_pcts: List[Tuple[float, float, Optional[str]]] = []
-    for i in range(0, len(chunk_id_seqs), BATCH_SIZE):
-        all_pcts.extend(_classify_batch_from_ids(chunk_id_seqs[i: i + BATCH_SIZE]))
+    for i in range(0, len(segment_id_seqs), BATCH_SIZE):
+        all_pcts.extend(_classify_batch_from_ids(segment_id_seqs[i:i + BATCH_SIZE]))
 
-    # 5. Weighted summary + per-segment results
+    # 4. Per-segment results + token-weighted aggregate
     segments = []
     total_human_w = total_ai_w = total_len = 0
-    detected_model_votes: Dict[str, float] = {}  # token-weighted votes per AI model
+    detected_model_votes: Dict[str, float] = {}
 
-    for idx, ((human_pct, ai_pct, det_model), tok_len) in enumerate(
-        zip(all_pcts, chunk_lengths)
+    for idx, ((human_pct, ai_pct, det_model), ids, seg_text) in enumerate(
+        zip(all_pcts, segment_id_seqs, segments_text)
     ):
+        tok_len = len(ids)
         segments.append({
             "segment_id": idx + 1,
-            "text": chunks_text[idx],
+            "text": seg_text,
             "dominant_label": "AI" if ai_pct > human_pct else "Human",
             "score": max(ai_pct, human_pct),
         })
