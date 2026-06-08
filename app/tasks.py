@@ -4,6 +4,7 @@ app/tasks.py — Background tasks for Celery.
 import gc
 import time
 import logging
+from celery.exceptions import SoftTimeLimitExceeded
 from flask import current_app
 from app.celery_app import celery
 from app.routes import _merge_segment_results
@@ -65,6 +66,18 @@ def analyze_document_task(self, payload):
     try:
         # 1. Run standard plugins
         results = registry.run(plugins_requested, text, timeout=timeout)
+    except SoftTimeLimitExceeded:
+        logger.warning("Task %s exceeded soft time limit — returning timeout error", self.request.id)
+        return {
+            "status": "error",
+            "error": "Analysis timed out. Try with a shorter text.",
+            "plugins_requested": plugins_requested,
+            "total_elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+        }
+    except Exception as exc:
+        logger.error("Task %s failed: %s", self.request.id, exc, exc_info=True)
+        raise
+    else:
 
         # 2. Obtain per-segment breakdown.
         # Reuse segments already computed by the ai_detection plugin when possible —

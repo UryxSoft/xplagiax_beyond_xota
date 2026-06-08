@@ -67,15 +67,14 @@ def _run_celery():
         "-A", "app.celery_app.celery",
         "worker",
         "--loglevel=info",
-        "--pool=solo",
-        "--concurrency=1",
+        "--pool=threads",
+        "--concurrency=2",
         "--without-heartbeat",
         "--without-gossip",
         "--without-mingle",
-        # Recycle the worker process after 50 tasks — equivalent to gunicorn's
-        # max_requests. Prevents Python high-water-mark memory from accumulating
-        # indefinitely over long uptimes. gunicorn will restart it via child_exit.
-        "--max-tasks-per-child=50",
+        # Threads pool does not support max-tasks-per-child (it's a process-level
+        # option). Memory is managed via soft_time_limit in the task instead.
+
     ]
     celery_main()
 
