@@ -640,9 +640,7 @@ def analyze_fast(text: str) -> dict:
     if not text.strip():
         return {"error": "El documento está vacío."}
 
-    text = clean_text(text)
-
-    # Cache check
+    # Cache on raw text (before cleaning) to preserve hit rate across callers
     _text_hash = _hashlib.sha256(text.encode()).hexdigest()
     _now = _time.monotonic()
     with _FAST_CACHE_LOCK:
@@ -653,15 +651,18 @@ def analyze_fast(text: str) -> dict:
             _oldest = min(_FAST_CACHE, key=lambda k: _FAST_CACHE[k][1])
             del _FAST_CACHE[_oldest]
 
-    # 1. Split at paragraph boundaries — each line/paragraph is a segment
+    # 1. Split BEFORE clean_text — clean_text collapses \s{2,} to a single
+    #    space, which destroys \n\n paragraph boundaries. Splitting first
+    #    preserves the human/AI paragraph separation, then we clean each
+    #    segment individually so the tokenizer receives normalised text.
     segments_text: List[str] = []
     for block in text.split('\n\n'):
         for line in block.split('\n'):
-            line = line.strip()
+            line = clean_text(line).strip()
             if line:
                 segments_text.append(line)
     if not segments_text:
-        segments_text = [text.strip()]
+        segments_text = [clean_text(text).strip()]
 
     BATCH_SIZE = 12
     # Reserve 2 slots for CLS/SEP — matches tokenizer(truncation=True) behavior
