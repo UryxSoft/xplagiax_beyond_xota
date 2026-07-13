@@ -121,6 +121,37 @@ tokenizer.backend_tokenizer.normalizer = Sequence([
 ])
 
 
+# ── Special-token wrapping derived from the tokenizer itself ──────────────────
+# [CRITICAL FIX] For a *fast* tokenizer (ModernBERT ships fast-only), the special
+# tokens [CLS]/[SEP] are added by the post-processor during
+# tokenizer(text) / encode(add_special_tokens=True) — NOT by
+# build_inputs_with_special_tokens(). On transformers 4.x that method inherits the
+# base identity implementation and returns the ids UNCHANGED (no specials); on 5.x
+# the fast backend does not implement it at all. Building model inputs with it
+# therefore drops [CLS]/[SEP], so ModernBERT pools over the wrong first token and
+# produces confident but INVERTED verdicts (all seeds agree → low disagreement),
+# while the reference tokenizer(text) path stays correct. We probe the tokenizer
+# once to recover the exact prefix/suffix it wraps a single sequence with, and
+# replicate it when building inputs from pre-tokenized ids.
+def _derive_special_token_wrap():
+    probe = tokenizer.encode("text", add_special_tokens=False)
+    full = tokenizer("text", add_special_tokens=True)["input_ids"]
+    if probe:
+        for start in range(len(full) - len(probe) + 1):
+            if full[start:start + len(probe)] == probe:
+                return full[:start], full[start + len(probe):]
+    prefix = [tokenizer.cls_token_id] if tokenizer.cls_token_id is not None else []
+    suffix = [tokenizer.sep_token_id] if tokenizer.sep_token_id is not None else []
+    return prefix, suffix
+
+
+_SPECIAL_PREFIX, _SPECIAL_SUFFIX = _derive_special_token_wrap()
+_NUM_SPECIALS = len(_SPECIAL_PREFIX) + len(_SPECIAL_SUFFIX)
+logger.info(
+    "Special-token wrap derived: prefix=%s suffix=%s", _SPECIAL_PREFIX, _SPECIAL_SUFFIX
+)
+
+
 # [MODIFIED v1.1] Returns 3-tuple: (result_message, fig, DetectionResult).
 # All inference logic is IDENTICAL to the original.
 
@@ -307,11 +338,15 @@ def _classify_batch_from_ids(id_seqs: List[List[int]]) -> List[Tuple[float, floa
         return []
 
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    max_content = tokenizer.model_max_length - 2  # 2 slots reserved for specials
+    max_content = tokenizer.model_max_length - _NUM_SPECIALS  # reserve slots for specials
 
-    # Add CLS/SEP (or equivalent) in a model-agnostic way
+    # Wrap each sequence with the tokenizer's REAL special tokens ([CLS] … [SEP]),
+    # exactly reproducing tokenizer(text, add_special_tokens=True). We do NOT use
+    # build_inputs_with_special_tokens(): on fast tokenizers it silently returns the
+    # ids unchanged, dropping the specials and corrupting the verdict (see
+    # _derive_special_token_wrap above).
     wrapped = [
-        tokenizer.build_inputs_with_special_tokens(ids[:max_content])
+        _SPECIAL_PREFIX + ids[:max_content] + _SPECIAL_SUFFIX
         for ids in id_seqs
     ]
     max_len = max(len(seq) for seq in wrapped)
@@ -717,8 +752,8 @@ def analyze_fast(text: str) -> dict:
         segments_text = [clean_text(text).strip()]
 
     BATCH_SIZE = 12
-    # Reserve 2 slots for CLS/SEP — matches tokenizer(truncation=True) behavior
-    max_content = tokenizer.model_max_length - 2
+    # Reserve slots for the tokenizer's specials — matches tokenizer(truncation=True)
+    max_content = tokenizer.model_max_length - _NUM_SPECIALS
 
     # 2. Tokenize each segment as an independent unit (truncation=True = reference behavior)
     segment_id_seqs: List[List[int]] = [
