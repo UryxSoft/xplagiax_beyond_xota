@@ -309,9 +309,13 @@ def _classify_batch_from_ids(id_seqs: List[List[int]]) -> List[Tuple[float, floa
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
     max_content = tokenizer.model_max_length - 2  # 2 slots reserved for specials
 
-    # Add CLS/SEP (or equivalent) in a model-agnostic way
+    # ModernBERT's fast tokenizer adds [CLS]/[SEP] via its post_processor, NOT via
+    # build_inputs_with_special_tokens() — that call is a no-op here, so it fed the
+    # classifier head content tokens with no [CLS], inverting every verdict. Add by id.
+    cls_id = tokenizer.cls_token_id
+    sep_id = tokenizer.sep_token_id
     wrapped = [
-        tokenizer.build_inputs_with_special_tokens(ids[:max_content])
+        ([cls_id] if cls_id is not None else []) + ids[:max_content] + ([sep_id] if sep_id is not None else [])
         for ids in id_seqs
     ]
     max_len = max(len(seq) for seq in wrapped)
