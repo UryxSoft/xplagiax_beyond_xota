@@ -102,8 +102,24 @@ class PluginRegistry:
                 down.append(name)
         return down
 
+    @staticmethod
+    def _call_with_context(plugin: Any, text: str, timeout: int, async_mode: bool) -> Any:
+        """Run plugin.analyze inside the per-thread execution context.
+
+        [Fase-2 M-11/M-7] Stamps a cooperative deadline (checked between inference
+        batches in detector_final so timed-out threads stop burning CPU) and the
+        async flag (lets the orchestrator activate async-only signals).
+        """
+        from app.engine.exec_context import set_context, clear_context
+        import time as _time
+        set_context(deadline=_time.monotonic() + timeout, async_mode=async_mode)
+        try:
+            return plugin.analyze(text)
+        finally:
+            clear_context()
+
     def run(self, plugin_names: List[str], text: str,
-            timeout: int = 30) -> Dict[str, Any]:
+            timeout: int = 30, async_mode: bool = False) -> Dict[str, Any]:
         """
         Execute requested plugins in parallel and return aggregated results.
 
@@ -139,7 +155,9 @@ class PluginRegistry:
             future_to_meta: Dict[Any, tuple] = {}
             for pname, plugin in valid:
                 t0 = time.perf_counter()
-                future_to_meta[executor.submit(plugin.analyze, text)] = (pname, t0)
+                future_to_meta[executor.submit(
+                    self._call_with_context, plugin, text, timeout, async_mode,
+                )] = (pname, t0)
 
             # P-07: per-plugin individual timeout — each plugin gets its full budget.
             # A shared deadline would let a slow plugin (e.g. watermark ~15s) starve
@@ -202,7 +220,9 @@ class PluginRegistry:
             future_to_meta: Dict[Any, tuple] = {}
             for pname, plugin in valid:
                 t0 = time.perf_counter()
-                future_to_meta[executor.submit(plugin.analyze, text)] = (pname, t0)
+                future_to_meta[executor.submit(
+                    self._call_with_context, plugin, text, timeout, False,
+                )] = (pname, t0)
 
             try:
                 for future in as_completed(future_to_meta, timeout=timeout):

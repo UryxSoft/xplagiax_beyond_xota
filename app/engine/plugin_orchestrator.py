@@ -69,6 +69,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -331,6 +332,18 @@ class PluginOrchestrator:
         StylometricProfiler so callers can access stats without opening the report.
         """
         additional: Dict[str, Any] = {}
+        # [Fase-2 M-8] Names of enabled plugins whose run failed — surfaced so the
+        # report can distinguish "signal absent because it broke" from "neutral signal".
+        degraded: list = []
+
+        # ── Language identification [Fase-2 M-5] ──────────────────────
+        # Cheap stopword-ratio detection; gates the English-lexicon Tier-1 features
+        # inside the fusion and is reported to the user.
+        try:
+            from lang_detect import detect_language
+            additional["language"] = detect_language(text)
+        except Exception as exc:
+            logger.warning("Language detection failed: %s", exc)
 
         # ── StylometricProfiler ───────────────────────────────────────
         if self._stylometric is not None:
@@ -344,6 +357,7 @@ class PluginOrchestrator:
                     stats.get("hapax_legomena_ratio", 0.0),
                 )
             except Exception as exc:
+                degraded.append("stylometric")
                 logger.warning("StylometricProfiler.compute_stats() failed: %s", exc)
 
         # ── ReasoningProfiler ─────────────────────────────────────────
@@ -381,6 +395,7 @@ class PluginOrchestrator:
                     logger.debug("Reasoning (partial): score=%.4f level=%s",
                                  ai_score, risk_level)
             except Exception as exc:
+                degraded.append("reasoning")
                 logger.warning("ReasoningProfiler.vectorize() failed: %s", exc)
 
         # ── PerplexityProfiler [NEW v3.7] ─────────────────────────────
@@ -409,6 +424,7 @@ class PluginOrchestrator:
                     ppl_stats.get("proxy_perplexity_mean", 0.0),
                 )
             except Exception as exc:
+                degraded.append("perplexity")
                 logger.warning("PerplexityProfiler.compute_stats() failed: %s", exc)
 
         # ── HybridSegmentAnalyzer [NEW v3.9] ──────────────────────────
@@ -427,9 +443,24 @@ class PluginOrchestrator:
                     hybrid_result.total_windows,
                 )
             except Exception as exc:
+                degraded.append("hybrid_segment")
                 logger.warning("HybridSegmentAnalyzer.analyze() failed: %s", exc)
 
         # ── ReferenceValidator [NEW v3.9] ─────────────────────────────
+        # [Fase-2 M-7] The strongest, most model-agnostic signal (external ground
+        # truth) stays OFF in the sync path (network latency), but activates in the
+        # ASYNC path where latency tolerance is high. The orchestrator is a preload
+        # singleton shared by both paths, so the switch is the per-thread execution
+        # context stamped by the Celery task — not an env var read at init.
+        if (self._reference_validator is None
+                and os.getenv("REFERENCE_CHECK_ASYNC", "1") == "1"):
+            try:
+                from exec_context import is_async
+                if is_async():
+                    self._ensure_reference_validator()
+            except Exception as exc:
+                logger.warning("Async reference-check activation failed: %s", exc)
+
         if self._reference_validator is not None:
             try:
                 ref_stats = self._reference_validator.compute_stats(text)
@@ -454,6 +485,7 @@ class PluginOrchestrator:
                     ref_stats.get("fabricated_count", 0),
                 )
             except Exception as exc:
+                degraded.append("reference_check")
                 logger.warning("ReferenceValidator.compute_stats() failed: %s", exc)
 
         # ── WatermarkDecoder ──────────────────────────────────────────
@@ -466,6 +498,7 @@ class PluginOrchestrator:
                     sig.detected, sig.confidence, sig.scheme_type,
                 )
             except Exception as exc:
+                degraded.append("watermark")
                 logger.warning("WatermarkDecoder.detect() failed: %s", exc)
 
         # ── Tier-1 model-agnostic signals (feed the fusion + reported standalone) ──
@@ -490,29 +523,41 @@ class PluginOrchestrator:
                     additional["author_signature"] = compute_authorship_consistency(
                         self._stylometric, text)
                 except Exception as exc:
+                    degraded.append("author_signature")
                     logger.warning("authorship_consistency failed: %s", exc)
 
         if self._discourse_analyzer is not None:
             try:
                 additional["discourse_structure"] = self._discourse_analyzer.analyze(text)
             except Exception as exc:
+                degraded.append("discourse_structure")
                 logger.warning("discourse analysis failed: %s", exc)
 
         if self._semantic_analyzer is not None:
             try:
                 additional["semantic_consistency"] = self._semantic_analyzer.analyze(text)
             except Exception as exc:
+                degraded.append("semantic_consistency")
                 logger.warning("semantic consistency failed: %s", exc)
 
         # ── LATE FUSION (model-agnostic, bounded, UNCALIBRATED) ───────────
         # Compute the fused P(AI) here, in the pipeline coordinator that owns `additional`,
         # so it is BOTH visible in the returned additional_analyses AND consumed by the
         # forensic verdict. The verdict no longer depends on the neural ensemble alone.
+        # [Fase-2 M-8] Surface degraded plugins BEFORE fusion so both the fusion dict
+        # and the report can state which signals are missing (a failed signal defaults
+        # to 0.0 in the vector — absent, not neutral, but the reader must know).
+        if degraded:
+            additional["degraded_signals"] = sorted(set(degraded))
+
         if os.getenv("FUSION_ACTIVE", "1") == "1" and detection_result is not None:
             try:
-                from fusion import FusionClassifier
-                _fres = FusionClassifier().predict_proba(detection_result, additional)
-                additional["fusion"] = _fres.to_dict()
+                from fusion import get_fusion_classifier
+                _fres = get_fusion_classifier().predict_proba(detection_result, additional)
+                _fdict = _fres.to_dict()
+                if degraded:
+                    _fdict["degraded_signals"] = sorted(set(degraded))
+                additional["fusion"] = _fdict
             except Exception as exc:
                 logger.warning("Fusion scoring failed: %s", exc)
 
@@ -549,6 +594,26 @@ class PluginOrchestrator:
             "forensic_report":      forensic_report,
             "forensic_report_path": forensic_report_path,
         }
+
+    # ── Lazy loaders ───────────────────────────────────────────────────
+
+    _ref_lock = threading.Lock()
+
+    def _ensure_reference_validator(self) -> None:
+        """[Fase-2 M-7] Load ReferenceValidator on first async use (thread-safe)."""
+        with self._ref_lock:
+            if self._reference_validator is not None:
+                return
+            try:
+                from reference_validator import ReferenceValidator, ReferenceRiskClassifier
+                self._reference_validator = ReferenceValidator(
+                    enable_network=self.config.reference_network,
+                )
+                self._reference_classifier = ReferenceRiskClassifier()
+                logger.info("ReferenceValidator lazily loaded for async path (network=%s)",
+                            self.config.reference_network)
+            except ImportError as exc:
+                logger.warning("ReferenceValidator unavailable: %s", exc)
 
     # ── Reasoning score helpers ────────────────────────────────────────
     # These exist solely because ReasoningProfiler produces a raw 15-dim

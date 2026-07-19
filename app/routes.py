@@ -52,7 +52,7 @@ def _plugin_timeout(word_count: int, cap: int) -> int:
 # [C-16 FIX] Cache key is namespaced by model version so a model/pipeline update
 # invalidates stale results instead of serving them for up to an hour. Bump
 # MODEL_VERSION (env or constant) whenever weights, thresholds, or fusion change.
-_MODEL_VERSION = os.getenv("MODEL_VERSION", "2026.06")
+_MODEL_VERSION = os.getenv("MODEL_VERSION", "2026.07")
 
 
 def _analysis_cache_key(text: str, plugins: list) -> str:
@@ -360,15 +360,19 @@ def analyze_status(task_id):
             'status': 'pending',
             'state': task.state
         }
+    elif task.state == 'SUCCESS':
+        # [Fase-2 M-15/C-08] Normalized contract: `state` is always the Celery state,
+        # `status` is always the ANALYSIS outcome. A task that completed but returned
+        # an internal error (e.g. soft-timeout payload) reports status="error" with
+        # state="SUCCESS" — coherent instead of the old ok/error mix.
+        info = task.info if isinstance(task.info, dict) else {}
+        response = {'state': task.state, **info}
+        response['status'] = info.get('status', 'ok')
     elif task.state != 'FAILURE':
         response = {
-            'status': 'processing' if task.state != 'SUCCESS' else 'ok',
+            'status': 'processing',
             'state': task.state
         }
-        if task.state == 'SUCCESS':
-            # task.info contains the returned dict from the task
-            # The task returns {"status": "ok", "results": ...}
-            response.update(task.info)
     else:
         # something went wrong in the background job
         response = {

@@ -82,8 +82,9 @@ def analyze_document_task(self, payload):
     )
 
     try:
-        # 1. Run standard plugins
-        results = registry.run(plugins_requested, text, timeout=timeout)
+        # 1. Run standard plugins. async_mode=True stamps the per-thread execution
+        # context (exec_context) so async-only signals (M-7 reference check) activate.
+        results = registry.run(plugins_requested, text, timeout=timeout, async_mode=True)
     except SoftTimeLimitExceeded:
         logger.warning("Task %s exceeded soft time limit — returning timeout error", self.request.id)
         return {

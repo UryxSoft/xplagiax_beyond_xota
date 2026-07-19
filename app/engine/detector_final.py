@@ -249,7 +249,12 @@ def classify_batch(texts: List[str]) -> List[Tuple[float, float]]:
     """
     if not texts:
         return []
-        
+
+    # [Fase-2 M-11] Cooperative checkpoint: if the caller's timeout already expired
+    # (registry reported the error), stop before paying for another forward pass.
+    from exec_context import check_deadline
+    check_deadline()
+
     cleaned_texts = [clean_text(t) for t in texts]
 
     # max_length makes truncation explicit — avoids silent loss of content
@@ -278,8 +283,10 @@ def classify_batch(texts: List[str]) -> List[Tuple[float, float]]:
         probs = avg_probs[i]
         human_prob = probs[24].item()
         ai_prob = 1.0 - human_prob
-        results.append((round(human_prob * 100), round(ai_prob * 100)))
-        
+        # [Fase-2 M-10/C-05] Keep 2-decimal floats: integer rounding per segment made
+        # confident outputs falsely crisp (100/0) and biased weighted aggregates.
+        results.append((round(human_prob * 100, 2), round(ai_prob * 100, 2)))
+
     return results
 
 
@@ -348,8 +355,9 @@ def _classify_batch_from_ids(id_seqs: List[List[int]]) -> List[Tuple[float, floa
     results = []
     for i in range(len(id_seqs)):
         probs = avg_probs[i]
-        human_pct = round(probs[24].item() * 100)
-        ai_pct = 100 - human_pct
+        # [Fase-2 M-10/C-05] Float percentages; display layers round for presentation.
+        human_pct = round(probs[24].item() * 100, 2)
+        ai_pct = round(100.0 - human_pct, 2)
         # Identify the specific AI model with highest probability (excluding human index 24)
         ai_clone = probs.clone()
         ai_clone[24] = 0.0
@@ -738,7 +746,9 @@ def analyze_fast(text: str) -> dict:
     # bit-identical; results are written back at their original index.
     order = sorted(range(len(segment_id_seqs)), key=lambda i: len(segment_id_seqs[i]))
     all_pcts: List[Optional[Tuple[float, float, Optional[str], float]]] = [None] * len(segment_id_seqs)
+    from exec_context import check_deadline
     for i in range(0, len(order), BATCH_SIZE):
+        check_deadline()  # [Fase-2 M-11] abort orphaned threads at batch boundaries
         bucket = order[i:i + BATCH_SIZE]
         for seg_idx, pcts in zip(bucket, _classify_batch_from_ids([segment_id_seqs[j] for j in bucket])):
             all_pcts[seg_idx] = pcts
@@ -770,8 +780,9 @@ def analyze_fast(text: str) -> dict:
     if total_len == 0:
         return {"error": "No se pudieron procesar tokens del documento."}
 
-    overall_human = round(total_human_w / total_len)
-    overall_ai = round(total_ai_w / total_len)
+    # [Fase-2 M-10] 2-decimal floats document-wide; presentation layers may round.
+    overall_human = round(total_human_w / total_len, 2)
+    overall_ai = round(total_ai_w / total_len, 2)
     overall_disagree = round(total_disagree_w / total_len, 2)
     overall_detected = max(detected_model_votes, key=detected_model_votes.get) if detected_model_votes else None
 
@@ -820,7 +831,7 @@ def classify_text_aggregate(text: str) -> DetectionResult:
     uncertain = abs(ai - human) < 15 or disagree >= 12.0
     return DetectionResult(
         prediction=prediction,
-        confidence=round(max(human, ai)),
+        confidence=round(max(human, ai), 1),
         human_percentage=human,
         ai_percentage=ai,
         detected_model=s.get("detected_model") if prediction == "AI" else None,

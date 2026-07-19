@@ -29,6 +29,7 @@ Changelog
 from __future__ import annotations
 
 import logging
+import os
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -527,9 +528,22 @@ class HybridSegmentAnalyzer:
         logger.info("HybridSegment: %d words, %d paragraphs",
                      total_words, len(paragraphs))
 
-        windows = self._segmenter.build_windows(total_words)
-        logger.info("HybridSegment: %d windows (size=%d, overlap=%.0f%%)",
-                     len(windows), WINDOW_WORDS, WINDOW_OVERLAP * 100)
+        # [Fase-2 M-22/P-01] Default: classify each PARAGRAPH once (1× tokens through
+        # the ensemble). The legacy 300-word/50%-overlap sliding windows re-infer the
+        # document ~2× for a smoothing benefit that operates at the same paragraph
+        # granularity the mapper reduces to anyway — it was the dominant CPU cost of
+        # the whole pipeline. Windows remain available via HYBRID_WINDOWS=1.
+        # Downstream (mapper, breakpoints, risk classifier, feature vector) is
+        # unchanged: each paragraph is its own fully-overlapping "window".
+        if os.getenv("HYBRID_WINDOWS", "0") == "1":
+            windows = self._segmenter.build_windows(total_words)
+            logger.info("HybridSegment: %d windows (size=%d, overlap=%.0f%%)",
+                         len(windows), WINDOW_WORDS, WINDOW_OVERLAP * 100)
+        else:
+            windows = [(p_start, p_end) for _, p_start, p_end in paragraphs
+                       if p_end > p_start]
+            logger.info("HybridSegment: paragraph mode — %d single-pass windows",
+                         len(windows))
 
         window_results = self._classifier.classify_windows(words, windows)
         paragraph_scores = self._mapper.map_to_paragraphs(paragraphs, window_results)
