@@ -276,6 +276,41 @@ def test_contributions_are_surfaced():
     assert d["contributions"]["ref_fabricated_ratio"] > 0
 
 
+def test_weights_roundtrip_and_env_loading(tmp_path, monkeypatch):
+    """M-19 wiring: trained weights persist to JSON and get_fusion_classifier
+    loads them (calibrated logistic) when FUSION_WEIGHTS_PATH is set."""
+    pytest.importorskip("sklearn")
+    import json
+    import fusion as fusion_mod
+    from calibration import TemperatureScaler
+
+    rng = np.random.default_rng(5)
+    n = 300
+    X = rng.normal(0, 1, (n, FUSION_VECTOR_DIM))
+    y = (X[:, FEATURE_NAMES.index("neural_ai_prob")] > 0).astype(int)
+    clf = FusionClassifier().fit(X, y)
+    clf.attach_calibrator(TemperatureScaler(temperature=1.5, fitted=True))
+
+    path = tmp_path / "fusion_weights.json"
+    path.write_text(json.dumps(clf.to_payload()))
+
+    monkeypatch.setenv("FUSION_WEIGHTS_PATH", str(path))
+    monkeypatch.setattr(fusion_mod, "_shared_fusion", None)  # reset singleton
+    loaded = fusion_mod.get_fusion_classifier()
+    assert loaded.is_trained
+    res = loaded.predict_proba_vec(X[0])
+    assert res.source == "logistic"
+    assert res.calibrated is True
+
+    # Schema-drift protection: wrong feature list must be refused.
+    bad = clf.to_payload()
+    bad["feature_names"] = bad["feature_names"][:-1]
+    with pytest.raises(ValueError, match="schema mismatch"):
+        FusionClassifier().load_payload(bad)
+
+    monkeypatch.setattr(fusion_mod, "_shared_fusion", None)  # don't leak to other tests
+
+
 def test_calibrator_attaches_to_fusion():
     pytest.importorskip("sklearn")
     rng = np.random.default_rng(3)

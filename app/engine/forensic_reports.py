@@ -1247,6 +1247,28 @@ class ForensicReportGenerator:
                                       "evidence level, not a conclusion.",
                 }
 
+        # ── METRICS LOG [Fase-2 F.3 KPIs] ────────────────────────────────────
+        # One JSON line per analysis when METRICS_LOG_PATH is set: feeds the
+        # %-Inconclusive, disagreement and drift dashboards without a new service.
+        _metrics_path = _os.getenv("METRICS_LOG_PATH", "")
+        if _metrics_path:
+            try:
+                import time as _time
+                _fused = additional.get("fusion") or {}
+                with open(_metrics_path, "a", encoding="utf-8") as _mf:
+                    _mf.write(json.dumps({
+                        "ts": round(_time.time(), 1),
+                        "verdict": verdict,
+                        "probability": round(float(overall_score), 4),
+                        "calibrated": bool(_fused.get("calibrated", False)),
+                        "fusion_source": _fused.get("source"),
+                        "disagreement": float(getattr(detection_result, "ensemble_disagreement", 0.0) or 0.0) if detection_result else None,
+                        "word_count": len(text.split()) if text else 0,
+                        "uncertainty_reason": (additional.get("verdict_uncertainty") or {}).get("reason"),
+                    }) + "\n")
+            except Exception as _mexc:
+                logger.debug("Metrics log write failed: %s", _mexc)
+
         # [FIX v3.7] Now collect evidence AFTER all analyses are complete
         evidence_points = self._collect_evidence(sentence_attrs, additional)
 

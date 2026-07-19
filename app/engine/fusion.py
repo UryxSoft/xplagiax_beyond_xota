@@ -26,8 +26,10 @@ unit-testable with synthetic dicts.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -560,20 +562,80 @@ class FusionClassifier:
     def is_trained(self) -> bool:
         return self._trained
 
+    # ── Persistence [Fase-2 M-19 wiring] ────────────────────────────────────
+    def to_payload(self) -> Dict[str, Any]:
+        """Serializable snapshot of a trained model (+ calibrator temperature)."""
+        if not self._trained or self._weights is None:
+            raise ValueError("Cannot serialize an untrained FusionClassifier")
+        temp = getattr(self._calibrator, "temperature", None)
+        return {
+            "schema": "fusion-weights-v1",
+            "feature_names": list(FEATURE_NAMES),
+            "weights": [float(w) for w in self._weights],
+            "bias": self._bias,
+            "mean": [float(m) for m in self._mean] if self._mean is not None else None,
+            "std": [float(s) for s in self._std] if self._std is not None else None,
+            "temperature": float(temp) if temp is not None else None,
+        }
+
+    def load_payload(self, payload: Dict[str, Any]) -> "FusionClassifier":
+        """
+        Load weights produced by scripts/corpus/train_fusion.py.
+
+        Refuses payloads whose feature_names do not EXACTLY match the current
+        _FUSION_SCHEMA — a schema drift means the weights are meaningless and
+        silently applying them would corrupt every verdict.
+        """
+        names = payload.get("feature_names")
+        if tuple(names or ()) != FEATURE_NAMES:
+            raise ValueError(
+                "Fusion weights schema mismatch: trained on "
+                f"{len(names or [])} features, current schema has "
+                f"{len(FEATURE_NAMES)}. Retrain (scripts/corpus/train_fusion.py) "
+                "before deploying."
+            )
+        self.set_weights(payload["weights"], bias=payload.get("bias", 0.0),
+                         mean=payload.get("mean"), std=payload.get("std"))
+        temp = payload.get("temperature")
+        if temp is not None:
+            from calibration import TemperatureScaler
+            self.attach_calibrator(TemperatureScaler(temperature=float(temp), fitted=True))
+        return self
+
 
 # ============================================================================
-# Shared instance [Fase-2 M-13]
+# Shared instance [Fase-2 M-13 + M-19 wiring]
 # ============================================================================
-# The classifier is stateless until trained, but callers (orchestrator, forensic
-# fallback) should share ONE instance so that future trained weights loaded at
-# preload are reused per-request instead of re-read from disk.
+# One process-wide classifier. If FUSION_WEIGHTS_PATH points at a weights file
+# produced by scripts/corpus/train_fusion.py, it is loaded ONCE at first use and
+# every request runs the trained+calibrated logistic fusion instead of the
+# interim heuristic. Remember to bump MODEL_VERSION when deploying new weights
+# (invalidates the namespaced result caches).
 
 _shared_fusion: Optional[FusionClassifier] = None
 
 
 def get_fusion_classifier() -> FusionClassifier:
-    """Return the process-wide FusionClassifier (created lazily)."""
+    """Return the process-wide FusionClassifier (created lazily; loads trained
+    weights from FUSION_WEIGHTS_PATH when set)."""
     global _shared_fusion
     if _shared_fusion is None:
-        _shared_fusion = FusionClassifier()
+        clf = FusionClassifier()
+        weights_path = os.getenv("FUSION_WEIGHTS_PATH", "")
+        if weights_path:
+            try:
+                with open(weights_path, "r", encoding="utf-8") as fh:
+                    clf.load_payload(json.load(fh))
+                logger.info(
+                    "Trained fusion weights loaded from %s (calibrated=%s). "
+                    "Ensure MODEL_VERSION was bumped for this deploy.",
+                    weights_path, clf._calibrator is not None,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to load fusion weights from %s — falling back to "
+                    "heuristic fusion: %s", weights_path, exc,
+                )
+                clf = FusionClassifier()
+        _shared_fusion = clf
     return _shared_fusion
