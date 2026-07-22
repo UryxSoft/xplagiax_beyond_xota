@@ -172,7 +172,18 @@ class PluginRegistry:
         if not valid:
             return results
 
-        budget = min(float(timeout), _REQUEST_DEADLINE_S)
+        # _REQUEST_DEADLINE_S bounds how long an HTTP caller waits — it exists so a
+        # slow plugin can't stretch a response past the proxy's own read timeout.
+        # In async_mode there IS no HTTP caller waiting: the Celery task owns the
+        # deadline via its per-enqueue soft_time_limit (scaled with word count),
+        # and analyze_document_task already derives `timeout` from that limit
+        # (see app/tasks.py — base 120 s, cap soft_limit-30). Capping it again at
+        # 60 s here silently discarded that whole calculation: ai_detection on any
+        # document past a few hundred words was killed mid-inference and reported
+        # as "exceeded the request budget", while the thread kept burning CPU to
+        # completion anyway — the exact failure adaptive_timeout() was written to
+        # prevent. Sync callers (routes.py) pass async_mode=False and keep the cap.
+        budget = float(timeout) if async_mode else min(float(timeout), _REQUEST_DEADLINE_S)
         t0 = time.perf_counter()
         future_to_name: Dict[Any, str] = {
             _EXECUTOR.submit(self._call_with_context, plugin, text, timeout, async_mode): pname

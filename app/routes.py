@@ -351,7 +351,21 @@ def analyze_document_async():
         # document on CPU needs a proportionally larger budget; the hard limit
         # trails the soft one so the task can still return a clean timeout error.
         word_count = len(text.split())
-        soft_limit = _plugin_timeout(word_count, cap=_ASYNC_SOFT_LIMIT_CAP)
+        # Async budget uses its OWN slope, not the sync default (30 s + 15 s/kword).
+        # That default has a 240 s floor it only clears past ~14 000 words, so a
+        # 500-word abstract and an 8 500-word paper got the SAME budget — and
+        # production logs show a ~6 000-word document taking 370-400 s of real
+        # wall clock (≈60 s per 1 000 words, four times the 15 s the formula
+        # assumed). The task then outlives its budget silently: with --pool=threads
+        # Celery's hard time_limit cannot kill a running thread, so the work keeps
+        # going while the client's poll ceiling expires and the result is discarded.
+        # Slope and base below are taken from those measurements, not estimated.
+        soft_limit = adaptive_timeout(
+            word_count,
+            base=int(os.getenv("ASYNC_BASE_SECONDS", "120")),
+            per_kwords=float(os.getenv("ASYNC_PER_KWORDS_SECONDS", "60")),
+            cap=_ASYNC_SOFT_LIMIT_CAP,
+        )
         soft_limit = max(soft_limit, 240)  # never below the decorator default
         task = analyze_document_task.apply_async(
             args=[payload],
