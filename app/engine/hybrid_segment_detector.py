@@ -47,11 +47,6 @@ WINDOW_OVERLAP: float = 0.50
 MIN_WINDOW_WORDS: int = 80
 MIN_PARAGRAPH_WORDS: int = 15
 
-# [C3] Windows are classified in batches of this size when a batch classifier is
-# injected — one tokenizer+ensemble call per batch instead of one per window.
-# Bounded so a very long document does not build a single oversized padded tensor.
-WINDOW_BATCH_SIZE: int = 12
-
 THRESHOLD_AI: float = 70.0
 THRESHOLD_UNCERTAIN: float = 30.0
 
@@ -287,26 +282,6 @@ class WindowClassifier:
                         batch_scores.append((50.0, 50.0))
             scores.extend(batch_scores)
         return scores
-
-    def _classify_batch(self, window_texts: List[str]) -> List[Tuple[float, float]]:
-        """Classify all windows in bounded batches; fall back per-batch on failure."""
-        pairs: List[Tuple[float, float]] = []
-        for i in range(0, len(window_texts), WINDOW_BATCH_SIZE):
-            chunk = window_texts[i:i + WINDOW_BATCH_SIZE]
-            try:
-                batch_pairs = self._classify_batch_fn(chunk)
-            except Exception as exc:
-                logger.warning("Batch window classification failed (%d..%d): %s",
-                               i, i + len(chunk), exc)
-                batch_pairs = [(50.0, 50.0)] * len(chunk)
-            # Guard against a batch fn returning the wrong length
-            if len(batch_pairs) != len(chunk):
-                logger.warning("Batch classifier returned %d results for %d windows; "
-                               "padding with neutral scores", len(batch_pairs), len(chunk))
-                batch_pairs = (list(batch_pairs) + [(50.0, 50.0)] * len(chunk))[:len(chunk)]
-            pairs.extend(batch_pairs)
-        return pairs
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ParagraphMapper
