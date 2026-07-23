@@ -2,7 +2,7 @@
 app/plugins/full_analysis.py — Complete XplagiaX forensic pipeline.
 
 Wraps PluginOrchestrator.run() to execute all enabled analyses:
-    ModernBERT detection → Stylometric → Hallucination → Reasoning →
+    Desklib AI detection → Stylometric → Hallucination → Reasoning →
     Perplexity → Hybrid Segment → Watermark →
     Forensic Report Generation
 
@@ -83,7 +83,7 @@ class FullAnalysisPlugin(BasePlugin):
 
     def description(self) -> str:
         return (
-            "Complete XplagiaX forensic pipeline: ModernBERT detection, "
+            "Complete XplagiaX forensic pipeline: Desklib AI detection, "
             "stylometric, hallucination, reasoning, perplexity, segment heatmap, "
             "watermark, and forensic report generation."
         )
@@ -92,10 +92,10 @@ class FullAnalysisPlugin(BasePlugin):
         orch = get_orchestrator()
         if not _available or orch is None:
             return {
-                "error": "XplagiaX engine not loaded. Ensure ModernBERT "
-                         "models are present and all dependencies installed.",
+                "error": "XplagiaX engine not loaded. Ensure the Desklib AI "
+                         "detector model is reachable and all dependencies installed.",
                 "required_files": [
-                    "detector_final.py (+ 4 ModernBERT model weights)",
+                    "detector_final.py (Desklib AI-text-detector model)",
                     "stylometric_profiler.py",
                     "hallucination_profile.py",
                     "reasoning_profiler.py",

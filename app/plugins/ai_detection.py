@@ -1,13 +1,14 @@
 """
 app/plugins/ai_detection.py — Quick AI vs Human classification.
 
-Uses detector_final.analyze_fast for adaptive-chunk inference:
-single tokenization pass, BATCH_SIZE=12, max_tokens auto-scaled by word count.
+Uses detector_final.analyze_fast for semantic-segment inference: text is split
+into topic-coherent segments (SegmentadorSemantico), each scored independently
+and aggregated token-weighted.
 
-Every response carries an explicit `uncertainty` block (margin between classes +
-ensemble seed disagreement) and the `model_version`, so clients see HOW sure the
-ensemble is instead of a falsely crisp verdict. Each prediction is also recorded
-in the drift monitor (anti-enshittification safeguard — see /api/drift-status).
+Every response carries an explicit `uncertainty` block (margin between classes)
+and the `model_version`, so clients see HOW sure the detector is instead of a
+falsely crisp verdict. Each prediction is also recorded in the drift monitor
+(anti-enshittification safeguard — see /api/drift-status).
 """
 
 import logging
@@ -24,7 +25,8 @@ _MODEL_VERSION = os.getenv("MODEL_VERSION", "2026.06")
 
 # Uncertainty thresholds — mirror classify_text_aggregate() in detector_final.
 _UNCERTAIN_MARGIN_PCT = 15.0      # |human% − ai%| below this → uncertain
-_UNCERTAIN_DISAGREEMENT_PCT = 12.0  # per-seed AI-prob std above this → uncertain
+_UNCERTAIN_DISAGREEMENT_PCT = 12.0  # ensemble_disagreement above this → uncertain
+                                    # (always 0.0 for the current single-model detector)
 
 _analyze_text = None
 _available = False
@@ -33,7 +35,7 @@ try:
     from app.engine.detector_final import analyze_fast
     _analyze_text = analyze_fast
     _available = True
-    logger.info("ModernBERT ensemble loaded for AI detection (analyze_fast)")
+    logger.info("Desklib AI detector loaded (analyze_fast)")
 except Exception as exc:
     logger.warning("detector_final not available: %s", exc)
 
@@ -58,11 +60,11 @@ class AIDetectionPlugin(BasePlugin):
         return _available
 
     def description(self) -> str:
-        return "Quick AI vs Human binary classification with semantic segmentation (ModernBERT ensemble)."
+        return "Quick AI vs Human binary classification with semantic segmentation (Desklib detector)."
 
     def analyze(self, text: str) -> Dict[str, Any]:
         if not _available:
-            return {"error": "ModernBERT models not loaded. Check model paths."}
+            return {"error": "Desklib AI detector not loaded. Check model paths."}
 
         doc_result = _analyze_text(text)
 
@@ -104,8 +106,8 @@ class AIDetectionPlugin(BasePlugin):
             "uncertainty": {
                 # Distance between the two classes, in percentage points.
                 "margin_pct": round(margin, 2),
-                # Std of the per-seed AI probability across the 3 ModernBERT
-                # seeds — high = the models disagree (out-of-distribution text).
+                # Reserved for a future multi-model ensemble; always 0.0 with
+                # the current single-model Desklib detector.
                 "ensemble_std_pct": round(disagreement, 2),
                 "in_uncertain_zone": in_uncertain_zone,
             },

@@ -60,6 +60,7 @@ rich>=15.0.0
 safetensors>=0.7.0
 scipy>=1.17.1
 semantic-version>=2.10.0
+sentencepiece>=0.2.0
 shellingham>=1.5.4
 six>=1.17.0
 sympy>=1.14.0

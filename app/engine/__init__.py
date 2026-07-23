@@ -7,7 +7,8 @@ the XplagiaX project.  They import each other directly (e.g.
 directory to sys.path to preserve those internal imports.
 
 Files in this directory:
-    detector_final.py           4-model ModernBERT ensemble
+    detector_final.py           Desklib single-model binary AI/human detector
+    segmentador.py              Semantic sentence segmenter (topic-boundary cuts)
     forensic_reports.py         HTML/JSON forensic report generator (v3.9)
     plugin_orchestrator.py      Pipeline coordinator
     perplexity_profiler.py      Token-level perplexity analysis

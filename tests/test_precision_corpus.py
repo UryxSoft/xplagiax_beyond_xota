@@ -24,19 +24,41 @@ import pytest
 
 pytestmark = pytest.mark.precision
 
-_ENGINE_DIR = Path(__file__).resolve().parent.parent / "app" / "engine"
-_WEIGHTS_PRESENT = (_ENGINE_DIR / "modernbert.bin").exists()
+
+def _model_available() -> bool:
+    """Best-effort, network-free check that the Desklib detector can likely
+    load: torch importable, plus either a local override directory or an
+    existing Hugging Face cache hit for the configured model. Never triggers
+    a download itself — a cache miss just means the test skips."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False
+
+    local_path = os.getenv("DESKLIB_LOCAL_PATH") or os.getenv("XPLAGIAX_EVAL_WEIGHTS")
+    if local_path and os.path.isdir(local_path):
+        return True
+
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return False
+    model_name = os.getenv("DESKLIB_MODEL_NAME", "desklib/ai-text-detector-v1.01")
+    return isinstance(try_to_load_from_cache(model_name, "config.json"), str)
+
+
+_WEIGHTS_PRESENT = _model_available()
 
 _needs_models = pytest.mark.skipif(
     not _WEIGHTS_PRESENT,
-    reason="ModernBERT weights not present (app/engine/modernbert.bin)",
+    reason="Desklib model not locally available (set DESKLIB_LOCAL_PATH or pre-warm the HF cache)",
 )
 
 
 @pytest.fixture(scope="module")
 def analyze_fast():
     if not _WEIGHTS_PRESENT:
-        pytest.skip("ModernBERT weights not present")
+        pytest.skip("Desklib model not locally available")
     from app.engine.detector_final import analyze_fast as fn
     return fn
 

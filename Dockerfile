@@ -2,12 +2,14 @@
 # Dockerfile — XplagiaX AI Detection Microservice
 #
 # SERVER DEPLOYMENT WORKFLOW:
-#   Before running docker build, place model weights at:
-#     app/engine/modernbert.bin             (~570 MB)
-#     app/engine/Model_groups_3class_seed12/ (~570 MB)
-#     app/engine/Model_groups_3class_seed22/ (~570 MB)
+#   The Desklib AI-text-detector model (tokenizer + weights) is downloaded
+#   from the Hugging Face Hub at BUILD time (see the builder stage below) and
+#   baked into the image's HF cache — no manual weight placement needed.
+#   The build therefore requires network access. To pin/serve a fully offline
+#   snapshot instead, set DESKLIB_LOCAL_PATH (or XPLAGIAX_EVAL_WEIGHTS) to a
+#   local model directory at runtime.
 #
-#   Then build + run:
+#   Build + run:
 #     docker build -t xplagiax .
 #     docker run -p 5006:5006 xplagiax
 # =============================================================================
@@ -52,15 +54,19 @@ nltk.download('averaged_perceptron_tagger_eng', download_dir='/root/nltk_data')"
 # We download it to /root/.local so it gets copied to the runtime stage
 RUN python -m spacy download en_core_web_sm --prefix=/root/.local
 
-# ── Pre-cache HuggingFace tokenizer + config for ModernBERT-base ─────────────
-# detector_final.py uses local_files_only=True so the HF cache MUST exist
-# inside the container. This downloads only the tokenizer/config files (~5 MB),
-# NOT the model weights (those come from app/engine/*.bin via COPY below).
+# ── Pre-download the Desklib AI-text-detector model + tokenizer ──────────────
+# detector_final.py loads this via from_pretrained() at import time. Baking it
+# into the image here means the running container never needs network access
+# (and cold-start doesn't pay the download cost). Override the repo id with
+# DESKLIB_MODEL_NAME (build arg) if pinning a different Desklib checkpoint.
+ARG DESKLIB_MODEL_NAME=desklib/ai-text-detector-v1.01
 RUN python -c "\
-from transformers import AutoConfig, AutoTokenizer; \
-AutoConfig.from_pretrained('answerdotai/ModernBERT-base', num_labels=41); \
-AutoTokenizer.from_pretrained('answerdotai/ModernBERT-base'); \
-print('HF tokenizer/config cached OK')"
+from transformers import AutoConfig, AutoTokenizer, AutoModel; \
+name = '${DESKLIB_MODEL_NAME}'; \
+AutoConfig.from_pretrained(name); \
+AutoTokenizer.from_pretrained(name); \
+AutoModel.from_pretrained(name); \
+print('Desklib model + tokenizer cached OK:', name)"
 
 
 # ====================== STAGE 2: Runtime ======================
@@ -84,8 +90,10 @@ COPY --from=builder /root/.local /home/flaskuser/.local
 COPY --from=builder --chown=flaskuser:flaskuser \
     /root/nltk_data /home/flaskuser/nltk_data
 
-# ── HuggingFace tokenizer/config cache ───────────────────────────────────────
-# CRITICAL: without this, local_files_only=True in detector_final.py fails.
+# ── HuggingFace model + tokenizer cache (Desklib detector) ───────────────────
+# Baked in by the builder stage's pre-download step, so detector_final.py's
+# from_pretrained() resolves from cache even if the running container has no
+# outbound network access.
 COPY --from=builder --chown=flaskuser:flaskuser \
     /root/.cache/huggingface /home/flaskuser/.cache/huggingface
 
@@ -107,8 +115,8 @@ ENV PATH=/home/flaskuser/.local/bin:$PATH \
     WEB_CONCURRENCY=1
 
 # ── Application code ─────────────────────────────────────────────────────────
-# app/engine/ contains the pre-placed model weights (*.bin, Model_groups_*)
-# Make sure those files are present on the host BEFORE running docker build.
+# The Desklib model weights are baked into the HF cache above — no per-host
+# weight files to place before building.
 COPY --chown=flaskuser:flaskuser app.py .
 COPY --chown=flaskuser:flaskuser gunicorn.conf.py .
 COPY --chown=flaskuser:flaskuser app/ ./app/
@@ -119,8 +127,9 @@ RUN mkdir -p /app/models && chown flaskuser:flaskuser /app/models
 USER flaskuser
 EXPOSE 5006
 
-# start-period=120s: ModernBERT models (~1.8 GB total) take 30-60 s to load.
-# On slow disks with Swap, this can take up to 2 minutes.
+# start-period=120s: the Desklib model (~1.7 GB, DeBERTa-v3-large based)
+# takes 20-40 s to load from the baked-in HF cache. On slow disks with swap,
+# this can take up to 2 minutes.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5006/health')" || exit 1
 
