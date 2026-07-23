@@ -40,8 +40,45 @@ _MAX_SENTENCES = 120
 _MIN_SENTENCES = 4
 
 # Heuristic thresholds (declared uncalibrated).
-_OVERLAP_MIN = 0.5          # Jaccard of content words for "same topic"
+# _OVERLAP_MIN was 0.5, which required two sentences to share half their content
+# words before they were even compared. Real self-contradictions rarely restate
+# the topic verbatim ("lived in Mesoamerica…Mexico" vs "lived only in South
+# America…Mexico" share ~14%), so the gate silently dropped them. Lowered to 0.34
+# — enough shared topic to avoid comparing unrelated sentences, low enough to
+# catch a genuine flip. Negation flips stay "weak" (report-only, not fed to the
+# fusion), so the looser gate cannot corrupt the AI verdict.
+_OVERLAP_MIN = 0.34         # Jaccard of content words for "same topic"
 _MIN_CONTENT_WORDS = 4      # ignore very short sentences (unreliable overlap)
+
+# Contrastive connectors: within ONE sentence they mark a self-contained
+# contrast ("began in 2000 BC, ALTHOUGH it started in 1500 AD"). The pair loop
+# only ever compares DISTINCT sentences, so these intra-sentence contradictions
+# — the most common kind in fabricated/LLM text — were completely invisible.
+# We split on them and compare the two clauses directly (same sentence ⇒ same
+# subject, so no overlap gate is needed).
+_CONTRAST_BY_LANG = {
+    "en": ("although", "though", "however", "but", "yet", "whereas", "while",
+           "nevertheless", "nonetheless", "even though", "on the other hand",
+           "at the same time", "in contrast", "conversely"),
+    "es": ("aunque", "sin embargo", "pero", "no obstante", "mientras que",
+           "a pesar de", "por el contrario", "en cambio", "al mismo tiempo",
+           "por otro lado"),
+    "fr": ("bien que", "cependant", "mais", "pourtant", "alors que",
+           "néanmoins", "toutefois", "en revanche", "au contraire",
+           "d'autre part"),
+    "pt": ("embora", "no entanto", "mas", "porém", "contudo", "enquanto",
+           "apesar de", "por outro lado", "ao mesmo tempo", "pelo contrário"),
+}
+
+
+def _contrast_regex(lang: str):
+    """Compile an alternation that splits a sentence at contrastive connectors."""
+    cues = _CONTRAST_BY_LANG.get(lang, _CONTRAST_BY_LANG["en"])
+    # Longest first so multi-word cues win over their single-word prefixes.
+    parts = sorted(cues, key=len, reverse=True)
+    alt = "|".join(re.escape(c) for c in parts)
+    # Word-boundary anchored, case-insensitive; used with re.split.
+    return re.compile(rf"[,;\s]+(?:{alt})\b", re.IGNORECASE | re.UNICODE)
 
 # [Fase-2 M-18] Per-language negation cues (en/es/fr/pt); unsupported → en.
 _NEGATION_CUES_BY_LANG = {
@@ -165,6 +202,31 @@ class SemanticConsistencyAnalyzer:
         words = [_content_words(s, stopwords) for s in sents]
         contradictions: List[Dict[str, Any]] = []
 
+        # ── intra-sentence contrasts ─────────────────────────────────────────
+        # "The city was founded in 1200, although it was actually built in 1800."
+        # Both clauses share the same subject by construction (same sentence), so
+        # no overlap gate is needed — only the numeric/negation checks apply.
+        contrast_re = _contrast_regex(lang)
+        for sent in sents:
+            clauses = [c.strip() for c in contrast_re.split(sent) if c.strip()]
+            if len(clauses) < 2:
+                continue
+            for a, b in zip(clauses, clauses[1:]):
+                wa = _content_words(a, stopwords)
+                wb = _content_words(b, stopwords)
+                if len(wa) < _MIN_CONTENT_WORDS or len(wb) < _MIN_CONTENT_WORDS:
+                    continue
+                verdict = self._pair_contradicts(a, b, wa, wb, use_nli, cues, same_subject=True)
+                if verdict is not None:
+                    reason, strong = verdict
+                    contradictions.append({
+                        "sentence_a": a[:160],
+                        "sentence_b": b[:160],
+                        "overlap": round(_jaccard(wa, wb), 3),
+                        "reason": f"{reason} (same sentence)",
+                        "strong": strong,
+                    })
+
         for i in range(len(sents)):
             if len(words[i]) < _MIN_CONTENT_WORDS:
                 continue
@@ -221,8 +283,19 @@ class SemanticConsistencyAnalyzer:
     # ── pair-level decision ──────────────────────────────────────────────────
     def _pair_contradicts(self, a: str, b: str, wa: Set[str], wb: Set[str],
                           use_nli: bool, cues=_NEGATION_CUES,
+                          same_subject: bool = False,
                           ) -> Optional[Tuple[str, bool]]:
-        """Return (reason, strong) or None. strong=True only for numeric/NLI evidence."""
+        """Return (reason, strong) or None. strong=True only for numeric/NLI evidence.
+
+        same_subject=True skips the shared-content-word gate on the numeric check:
+        two clauses of ONE sentence joined by a contrastive connector ("began in
+        2000, although it started in 1500") are about the same subject by
+        construction — it is usually elided from the second clause ("it"), so
+        wa & wb is often empty even though the contradiction is real. Cross-
+        sentence pairs still require overlap, since there the shared subject is
+        exactly what the caller's Jaccard gate was checking for before this
+        function ever runs.
+        """
         if use_nli:
             label = self._nli_contradiction(a, b)
             if label is not None:
@@ -231,9 +304,9 @@ class SemanticConsistencyAnalyzer:
         # Heuristic 2 first: same subject, different number (specific → strong).
         nums_a = set(_NUM_RE.findall(a))
         nums_b = set(_NUM_RE.findall(b))
-        if nums_a and nums_b and nums_a != nums_b and (wa & wb):
+        if nums_a and nums_b and nums_a != nums_b and (same_subject or (wa & wb)):
             shared = (wa & wb) - {n for n in nums_a | nums_b}
-            if len(shared) >= _MIN_CONTENT_WORDS:
+            if same_subject or len(shared) >= _MIN_CONTENT_WORDS:
                 return (f"numeric mismatch ({sorted(nums_a)} vs {sorted(nums_b)}) "
                         f"on shared subject"), True
         # Heuristic 1: negation-polarity flip on shared topic (noisy → weak, report-only).

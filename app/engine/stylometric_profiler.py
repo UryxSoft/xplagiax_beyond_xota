@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field, fields
@@ -434,6 +435,9 @@ class HybridDetectionResult:
 # ---------------------------------------------------------------------------
 
 
+_HAPAX_MIN_WORDS = int(os.getenv("HAPAX_MIN_WORDS", "50"))
+
+
 def _extract_lexical_features(text: str) -> Dict[str, float]:
     """Extract vocabulary richness, word length, and rarity metrics."""
     words = re.findall(r"\b\w+\b", text.lower())
@@ -468,11 +472,24 @@ def _extract_lexical_features(text: str) -> Dict[str, float]:
 
     hapax = sum(1 for v in counts.values() if v == 1)
     rare = sum(1 for v in counts.values() if v < 3)
+
+    # Hapax ratio is a sample-size artifact below _HAPAX_MIN_WORDS: in a 13-word
+    # fragment almost every word appears exactly once simply because there is no
+    # room for repetition, regardless of who wrote it — the ratio sits near 1.0
+    # for any author. The fusion weights it -0.25 (pro-human, see
+    # engine/fusion.py _HEURISTIC_HUMAN_WEIGHTS), so on tiny inputs this noise
+    # was diluting an otherwise confident neural verdict (e.g. 97% -> 91%).
+    # Zeroed out below the floor instead of omitted: fusion multiplies
+    # weight * value, so 0.0 contributes nothing in either direction — the same
+    # "missing evidence is neutral, not pro-human" contract author_signature and
+    # semantic_consistency already use for their own inconclusive cases.
+    hapax_ratio = (hapax / total) if total >= _HAPAX_MIN_WORDS else 0.0
+
     return {
         "vocabulary_richness": mattr,
         "avg_word_length": float(np.mean([len(w) for w in words])),
         "rare_word_ratio": rare / total,
-        "hapax_legomena_ratio": hapax / total,
+        "hapax_legomena_ratio": hapax_ratio,
     }
 
 

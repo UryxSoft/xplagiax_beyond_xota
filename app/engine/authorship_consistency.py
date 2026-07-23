@@ -42,7 +42,20 @@ _OUTLIER_RMS_Z = 1.8
 
 
 def split_chunks(text: str) -> List[str]:
-    """Greedily group paragraphs/sentences into ~_TARGET_CHUNK_WORDS chunks."""
+    """Greedily group paragraphs/sentences into ~target-word chunks.
+
+    The fixed _TARGET_CHUNK_WORDS=140 packed a 354-word essay into only 2
+    chunks (needs _MIN_CHUNKS=3), so authorship-consistency came back
+    "inconclusive" on completely ordinary short documents — not just edge
+    cases. Target now adapts to the document: small enough that a document
+    with >= _MIN_CHUNKS * _MIN_CHUNK_WORDS words always clears the minimum,
+    but never below _MIN_CHUNK_WORDS (a chunk that small is unreliable for
+    stylometry) and never above the original 140 (long documents keep the
+    same chunk size and thus the same comparison granularity as before).
+    """
+    word_count = len(text.split())
+    target = min(_TARGET_CHUNK_WORDS, max(_MIN_CHUNK_WORDS, word_count // _MIN_CHUNKS))
+
     blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
     if len(blocks) < _MIN_CHUNKS:
         blocks = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
@@ -53,7 +66,7 @@ def split_chunks(text: str) -> List[str]:
     for b in blocks:
         buf.append(b)
         count += len(b.split())
-        if count >= _TARGET_CHUNK_WORDS:
+        if count >= target:
             chunks.append(" ".join(buf))
             buf, count = [], 0
     if buf:

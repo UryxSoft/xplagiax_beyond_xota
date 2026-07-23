@@ -140,7 +140,13 @@ class HybridAnalysisResult:
             "paragraph_scores": [
                 {
                     "index": p.paragraph_index,
+                    # text_preview stays 80 chars for compact UI (the paragraph
+                    # table). text_full is the untruncated paragraph — full_analysis
+                    # mode's client-side highlighter matches this against the raw
+                    # input text to color each AI/human span; matching only the
+                    # 80-char preview left everything past it unhighlighted.
                     "text_preview": p.text[:80],
+                    "text_full": p.text,
                     "word_count": p.word_count,
                     "ai_score": round(p.ai_score, 2),
                     "human_score": round(p.human_score, 2),

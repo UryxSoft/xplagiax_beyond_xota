@@ -656,7 +656,10 @@ def analyze_fast(text: str) -> dict:
     if not segments_text:
         segments_text = [clean_text(text).strip()]
 
-    BATCH_SIZE = 12
+    # Bigger batches amortise per-call overhead and keep more CPU cores busy per
+    # forward pass; env-tunable so a multi-core box (raised TORCH_NUM_THREADS) can
+    # push it up without a rebuild. Result is bit-identical — batching only pads.
+    BATCH_SIZE = int(os.getenv("SEGMENT_BATCH_SIZE", "12"))
     # Reserve slots for the tokenizer's specials — matches tokenizer(truncation=True)
     max_content = tokenizer.model_max_length - _NUM_SPECIALS
 
@@ -666,20 +669,45 @@ def analyze_fast(text: str) -> dict:
         for seg in segments_text
     ]
 
+    # 2b. Deduplicate identical token sequences. A thesis repeats boilerplate —
+    # running headers, chapter labels, the "References" heading, recurring
+    # citations — and inference is deterministic, so an identical token sequence
+    # always yields an identical verdict. Classify each UNIQUE sequence once and
+    # fan the result back out to every position that shares it. Bit-identical:
+    # this only removes redundant forward passes, it never changes a score.
+    # Keyed on the post-truncation ids (not raw text), so two segments differing
+    # only past the truncation point correctly collapse to one.
+    unique_index: Dict[tuple, int] = {}
+    unique_seqs: List[List[int]] = []
+    seg_to_unique: List[int] = []
+    for ids in segment_id_seqs:
+        key = tuple(ids)
+        u = unique_index.get(key)
+        if u is None:
+            u = len(unique_seqs)
+            unique_index[key] = u
+            unique_seqs.append(ids)
+        seg_to_unique.append(u)
+
     # 3. Ensemble inference — same 3-model softmax average as reference classify_text()
     # Length-bucketed batching: segments are classified in ascending-length order so
     # each batch pads to a near-uniform length instead of the batch max. Mixed-length
     # documents (short + long paragraphs) waste 30-50% of forward-pass FLOPs on pad
     # tokens otherwise. Each segment is an independent forward pass, so scores are
     # bit-identical; results are written back at their original index.
-    order = sorted(range(len(segment_id_seqs)), key=lambda i: len(segment_id_seqs[i]))
-    all_pcts: List[Optional[Tuple[float, float, Optional[str], float]]] = [None] * len(segment_id_seqs)
+    order = sorted(range(len(unique_seqs)), key=lambda i: len(unique_seqs[i]))
+    unique_pcts: List[Optional[Tuple[float, float, Optional[str], float]]] = [None] * len(unique_seqs)
     from exec_context import check_deadline
     for i in range(0, len(order), BATCH_SIZE):
         check_deadline()  # [Fase-2 M-11] abort orphaned threads at batch boundaries
         bucket = order[i:i + BATCH_SIZE]
-        for seg_idx, pcts in zip(bucket, _classify_batch_from_ids([segment_id_seqs[j] for j in bucket])):
-            all_pcts[seg_idx] = pcts
+        for uniq_idx, pcts in zip(bucket, _classify_batch_from_ids([unique_seqs[j] for j in bucket])):
+            unique_pcts[uniq_idx] = pcts
+
+    # Fan the unique results back out to every original segment position.
+    all_pcts: List[Optional[Tuple[float, float, Optional[str], float]]] = [
+        unique_pcts[seg_to_unique[i]] for i in range(len(segment_id_seqs))
+    ]
 
     # 4. Per-segment results + token-weighted aggregate
     segments = []
