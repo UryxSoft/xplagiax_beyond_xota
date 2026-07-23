@@ -276,14 +276,48 @@ def _gradio_classify(text: str):
 
 
 # ── [C2] Segment-level inference cache ────────────────────────────
-# classify_batch() is the shared entry point for the hybrid window classifier,
-# classify_segment(), and any chunked caller. The SAME window/segment text is
-# often scored several times per request, and repeatedly across near-identical
-# requests. Each entry is two floats, so the cache tops out at a few hundred KB.
-# Namespaced by _CACHE_NS: a model swap invalidates it.
-_SEG_CACHE: "_OrderedDict[str, Tuple[float, float]]" = _OrderedDict()
+# Shared by classify_batch() (hybrid window classifier, classify_segment(), any
+# chunked caller) AND analyze_fast() (document segmentation). Previously each
+# had its own cache, so the SAME segment/window text scored via analyze_fast
+# (ai_detection) and via classify_batch (segment_analysis's hybrid detector, or
+# full_analysis running both) paid for the forward pass twice in one request —
+# the two caches never shared a hit. Storing the raw (ai_prob, tok_len) pair
+# here — instead of pre-rounded percentages — lets both call sites read from
+# and write to the SAME entries while each still applies its own public
+# rounding contract (classify_batch: int %, analyze_fast: 2-decimal %) exactly
+# as before. Each entry is a float + an int, so the cache tops out at a few
+# hundred KB. Namespaced by _CACHE_NS: a model swap invalidates it.
+_SEG_CACHE: "_OrderedDict[str, Tuple[float, int]]" = _OrderedDict()
 _SEG_CACHE_LOCK = _threading.Lock()
 _SEG_CACHE_MAX = int(os.getenv("SEGMENT_CACHE_MAX", "2048"))
+
+
+def _seg_cache_lookup(cleaned_texts: List[str]) -> Tuple[List[Optional[Tuple[float, int]]], List[str]]:
+    """Shared LRU lookup: keys are _CACHE_NS + sha1(cleaned_text). Returns the
+    per-text (ai_prob, tok_len) hit (or None on miss) plus the computed keys,
+    so callers can write misses back under the same keys after inference."""
+    keys = [
+        _CACHE_NS + ":" + _hashlib.sha1(t.encode("utf-8")).hexdigest()
+        for t in cleaned_texts
+    ]
+    hits: List[Optional[Tuple[float, int]]] = [None] * len(cleaned_texts)
+    with _SEG_CACHE_LOCK:
+        for i, key in enumerate(keys):
+            hit = _SEG_CACHE.get(key)
+            if hit is not None:
+                _SEG_CACHE.move_to_end(key)
+                hits[i] = hit
+    return hits, keys
+
+
+def _seg_cache_store(keys: List[str], values: List[Tuple[float, int]]) -> None:
+    """Write (ai_prob, tok_len) misses back into the shared LRU, keyed as above."""
+    with _SEG_CACHE_LOCK:
+        for key, value in zip(keys, values):
+            _SEG_CACHE[key] = value
+            _SEG_CACHE.move_to_end(key)
+        while len(_SEG_CACHE) > _SEG_CACHE_MAX:
+            _SEG_CACHE.popitem(last=False)
 
 
 def _cache_namespace() -> str:
@@ -306,9 +340,11 @@ def classify_batch(texts: List[str]) -> List[Tuple[float, float]]:
     Clasifica una lista de segmentos en un solo lote (batch).
     Es mucho más rápido que procesar uno por uno.
 
-    Segment results are memoised in a bounded LRU keyed by the cleaned text, so
-    only cache MISSES reach the model. Scores for misses are numerically
-    identical to the uncached path (same tokenization, same sigmoid).
+    Segment results are memoised in the shared LRU (also consulted by
+    analyze_fast — see _SEG_CACHE above), keyed by the cleaned text, so only
+    cache MISSES reach the model. Scores for misses are numerically identical
+    to the uncached path (same tokenization, same sigmoid). Return shape
+    (rounded int percentages) is unchanged from before the cache was unified.
     """
     if not texts:
         return []
@@ -319,18 +355,13 @@ def classify_batch(texts: List[str]) -> List[Tuple[float, float]]:
     check_deadline()
 
     cleaned_texts = [clean_text(t) for t in texts]
-    keys = [
-        _CACHE_NS + ":" + _hashlib.sha1(t.encode("utf-8")).hexdigest()
-        for t in cleaned_texts
-    ]
+    hits, keys = _seg_cache_lookup(cleaned_texts)
 
     results: List[Optional[Tuple[float, float]]] = [None] * len(texts)
-    with _SEG_CACHE_LOCK:
-        for i, key in enumerate(keys):
-            hit = _SEG_CACHE.get(key)
-            if hit is not None:
-                _SEG_CACHE.move_to_end(key)
-                results[i] = hit
+    for i, hit in enumerate(hits):
+        if hit is not None:
+            ai_prob, _tok_len = hit
+            results[i] = (round((1.0 - ai_prob) * 100), round(ai_prob * 100))
 
     miss_idx = [i for i, r in enumerate(results) if r is None]
     if miss_idx:
@@ -346,16 +377,14 @@ def classify_batch(texts: List[str]) -> List[Tuple[float, float]]:
 
         logits = model(**inputs)["logits"]
         ai_probs = torch.sigmoid(logits).squeeze(-1)
+        tok_lens = inputs["attention_mask"].sum(dim=1)
 
-        with _SEG_CACHE_LOCK:
-            for j, i in enumerate(miss_idx):
-                ai_prob = ai_probs[j].item()
-                pair = (round((1.0 - ai_prob) * 100), round(ai_prob * 100))
-                results[i] = pair
-                _SEG_CACHE[keys[i]] = pair
-                _SEG_CACHE.move_to_end(keys[i])
-            while len(_SEG_CACHE) > _SEG_CACHE_MAX:
-                _SEG_CACHE.popitem(last=False)
+        miss_values: List[Tuple[float, int]] = []
+        for j, i in enumerate(miss_idx):
+            ai_prob = ai_probs[j].item()
+            results[i] = (round((1.0 - ai_prob) * 100), round(ai_prob * 100))
+            miss_values.append((ai_prob, int(tok_lens[j].item())))
+        _seg_cache_store([keys[i] for i in miss_idx], miss_values)
 
     return results  # every slot is filled: hit above or miss inference here
 
@@ -449,13 +478,27 @@ def analyze_fast(text: str) -> dict:
             unique_texts.append(s)
         seg_to_unique.append(u)
 
-    # Length-bucketed batching: segments are classified in ascending-length order
-    # so each batch pads to a near-uniform length instead of the batch max.
-    # Mixed-length documents (short + long paragraphs) waste 30-50% of forward-
-    # pass FLOPs on pad tokens otherwise.
-    order = sorted(range(len(unique_texts)), key=lambda i: len(unique_texts[i]))
+    # [C2] Shared-cache lookup FIRST: a segment already scored via classify_batch()
+    # in this same request (e.g. segment_analysis's hybrid detector, or another
+    # plugin run alongside ai_detection) skips tokenization AND the forward pass
+    # entirely — not just the forward pass — since (ai_prob, tok_len) is cached
+    # together. This is the same _SEG_CACHE classify_batch() reads/writes, so
+    # the two call paths finally share hits instead of each paying separately.
+    unique_hits, unique_keys = _seg_cache_lookup(unique_texts)
     unique_pcts: List[Optional[Tuple[float, float]]] = [None] * len(unique_texts)
     unique_tok_len: List[int] = [0] * len(unique_texts)
+    for i, hit in enumerate(unique_hits):
+        if hit is not None:
+            ai_prob, tok_len = hit
+            unique_pcts[i] = (round((1.0 - ai_prob) * 100, 2), round(ai_prob * 100, 2))
+            unique_tok_len[i] = tok_len
+
+    # Length-bucketed batching over cache MISSES only: segments are classified in
+    # ascending-length order so each batch pads to a near-uniform length instead
+    # of the batch max. Mixed-length documents (short + long paragraphs) waste
+    # 30-50% of forward-pass FLOPs on pad tokens otherwise.
+    miss_idx = [i for i, v in enumerate(unique_pcts) if v is None]
+    order = sorted(miss_idx, key=lambda i: len(unique_texts[i]))
 
     from exec_context import check_deadline
     for i in range(0, len(order), BATCH_SIZE):
@@ -472,13 +515,17 @@ def analyze_fast(text: str) -> dict:
         logits = model(**inputs)["logits"]
         ai_probs = torch.sigmoid(logits).squeeze(-1)
         tok_lens = inputs["attention_mask"].sum(dim=1)
+        batch_cache_values: List[Tuple[float, int]] = []
         for k, uniq_idx in enumerate(bucket):
             ai_prob = ai_probs[k].item()
+            tok_len = int(tok_lens[k].item())
             unique_pcts[uniq_idx] = (
                 round((1.0 - ai_prob) * 100, 2),
                 round(ai_prob * 100, 2),
             )
-            unique_tok_len[uniq_idx] = int(tok_lens[k].item())
+            unique_tok_len[uniq_idx] = tok_len
+            batch_cache_values.append((ai_prob, tok_len))
+        _seg_cache_store([unique_keys[j] for j in bucket], batch_cache_values)
 
     # Fan the unique results back out to every original segment position.
     all_pcts = [unique_pcts[seg_to_unique[i]] for i in range(len(segments_text))]
