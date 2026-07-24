@@ -1825,9 +1825,10 @@ significantly between adjacent paragraphs, indicating an authorship switch.</p>
 </h2>
 <div id="hybrid-section" class="collapsible-section">
 <div class="disclaimer" style="background:#f0e6ff; border:2px solid #8e44ad; color:#4a235a;">
-  <strong>SEGMENT ANALYSIS — Sliding Window ModernBERT</strong><br>
-  Each paragraph is classified independently using overlapping 300-word windows passed through
-  the 4-model ModernBERT ensemble. This reveals <strong>where</strong> in the document AI was
+  <strong>SEGMENT ANALYSIS — Per-Paragraph Detection</strong><br>
+  Each paragraph is classified independently (one pass per paragraph by default; set
+  HYBRID_WINDOWS=1 for overlapping 300-word sliding windows instead) through the Desklib
+  AI-text detector. This reveals <strong>where</strong> in the document AI was
   used, not just whether it was used. Red = AI-generated, Green = Human-written, Yellow = Uncertain.
 </div>
 <div style="text-align:center; margin:20px 0;">

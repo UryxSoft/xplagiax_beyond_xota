@@ -41,9 +41,10 @@ if _ENGINE_DIR not in sys.path:
 # The sys.path injection above makes `import detector_final` WORK, but Python
 # caches modules by name: `detector_final` and `app.engine.detector_final`
 # would be executed twice as two independent module objects. For detector_final
-# that means loading the 3-seed ModernBERT ensemble TWICE (~3.4 GB wasted) the
-# moment the orchestrator (bare imports) and a plugin (qualified imports) are
-# both active. This finder redirects any bare import of a module that lives in
+# that means loading the Desklib detector TWICE (~3.4 GB wasted, same order of
+# magnitude as the 3-seed ModernBERT ensemble this mechanism originally guarded
+# against) the moment the orchestrator (bare imports) and a plugin (qualified
+# imports) are both active. This finder redirects any bare import of a module that lives in
 # this directory to its already-canonical `app.engine.<name>` instance, so both
 # import spellings return the SAME module object.
 import importlib

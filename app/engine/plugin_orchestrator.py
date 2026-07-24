@@ -1,5 +1,5 @@
 """
-plugin_orchestrator.py  (xota_ensemble_v6 — inference/)
+plugin_orchestrator.py  (desklib_v1 — inference/)
 =========================================================
 Thin coordination layer. Contains NO plugin business logic.
 
@@ -55,7 +55,7 @@ Usage
     orch   = PluginOrchestrator(PluginConfig(enable_watermark=True))
     result = orch.run("Paste text here...")
 
-    # Pre-computed detection (avoids re-running the 4 models)
+    # Pre-computed detection (avoids re-running the Desklib detector)
     msg, fig, det = classify_text("Paste text here...")
     result        = orch.run_with_result("Paste text here...", det)
 
@@ -299,7 +299,7 @@ class PluginOrchestrator:
         Run all enabled plugins against a pre-computed DetectionResult.
 
         Use this when classify_text() has already been called (e.g. in Gradio)
-        to avoid re-running the 4-model ensemble.
+        to avoid re-running the Desklib detector.
 
         detection_result.statistical_features is populated in-place by
         StylometricProfiler so callers can access stats without opening the report.

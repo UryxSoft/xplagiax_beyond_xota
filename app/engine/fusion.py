@@ -71,7 +71,13 @@ _FUSION_SCHEMA: Tuple[str, ...] = (
     "hyb_ai_ratio",
     "hyb_breakpoints",
     "hyb_longest_ai_run",
-    # ── Reference validator ──
+    # ── Reference validator ── [DEAD SIGNAL] additional_analyses["reference_check"]
+    # is never populated — the network-bound citation validator was deliberately
+    # removed (see plugin_orchestrator.py's PluginConfig [REMOVED] note and
+    # docs/auditorias/ENSHITTIFICATION_*.md). These three always read 0.0 via the
+    # _num() default. Kept in the schema (not deleted) so a future reinstated
+    # reference-check plugin, or a retrained fusion model, doesn't need a schema
+    # migration — but until then, treat every ref_* weight below as inert.
     "ref_fabricated_ratio",
     "ref_chimeric_ratio",
     "ref_verified_ratio",
@@ -177,7 +183,8 @@ class FusionFeatureBuilder:
         hyb = aa.get("hybrid_segment", {})
         hyb_fv = hyb.get("feature_vector", {}) if isinstance(hyb, dict) else {}
 
-        # ── Reference ──
+        # ── Reference ── always {} — "reference_check" is never produced by the
+        # orchestrator (feature removed, see the _FUSION_SCHEMA comment above).
         ref = aa.get("reference_check", {})
         ref_fv = ref.get("feature_values", ref) if isinstance(ref, dict) else {}
 
@@ -295,13 +302,17 @@ _NEURAL_LOGIT_CAP: float = 4.0
 
 # Bounded log-odds weights for model-agnostic adjustments (each input is in [0,1]).
 # [Fase-2 N-01/N-02] Removed from this dict:
-#   - hyb_ai_ratio: produced by the SAME 3-model ensemble as neural_ai_prob — counting it
+#   - hyb_ai_ratio: produced by the SAME underlying detector as neural_ai_prob — counting it
 #     here double-counted the neural evidence (it stays in the vector for the TRAINED
 #     fusion, where the logistic regression absorbs the collinearity).
 #   - ppl_low_ratio: Tier-1 proxy is derived from hapax/TTR (not perplexity) and dies
 #     under any edit; too fragile to move a verdict.
 _HEURISTIC_WEIGHTS: Dict[str, float] = {
-    "ref_fabricated_ratio":   1.6,   # strong: verified-absent citations (model-agnostic)
+    # ref_fabricated_ratio/ref_chimeric_ratio are currently INERT (always 0.0 — see
+    # the _FUSION_SCHEMA "reference validator" note above): the highest-weighted
+    # signal family below never actually contributes until reference-check is
+    # reinstated. dsc_uniformity (0.7) is the strongest signal that is actually live.
+    "ref_fabricated_ratio":   1.6,   # strong when live: verified-absent citations (model-agnostic)
     "ref_chimeric_ratio":     0.9,
     "hal_overall":            0.6,   # moderate: internal incoherence
     "rsn_cot_scaffold":       0.5,   # reasoning-model scaffolding
@@ -317,7 +328,7 @@ _HEURISTIC_WEIGHTS: Dict[str, float] = {
 _HEURISTIC_HUMAN_WEIGHTS: Dict[str, float] = {
     "sty_burstiness":     -0.35,
     "sty_hapax_ratio":    -0.25,
-    "ref_verified_ratio": -0.60,
+    "ref_verified_ratio": -0.60,  # currently INERT — always 0.0, see _FUSION_SCHEMA note
 }
 
 # [Fase-2 M-5] Features whose computation depends on ENGLISH lexicons. On non-English
@@ -404,7 +415,10 @@ def heuristic_fusion(features: Dict[str, float],
         adj += c
 
     # Corroboration rule: full positive budget only with ≥2 active families;
-    # external ground truth (reference) corroborates on its own.
+    # external ground truth (reference) corroborates on its own. NOTE: the
+    # "reference" family is currently always inactive (ref_* features are dead,
+    # see _FUSION_SCHEMA note) so this branch never fires today — kept for when
+    # reference-check is reinstated.
     active = sum(1 for lo in family_lo.values() if lo >= _FAMILY_ACTIVE_MIN)
     if family_lo.get("reference", 0.0) >= _FAMILY_ACTIVE_MIN:
         active += 1

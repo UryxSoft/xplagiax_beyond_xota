@@ -1,12 +1,12 @@
 """
-hybrid_segment_detector.py  (xota_ensemble_v6 — inference/)
+hybrid_segment_detector.py  (desklib_v1 — inference/)
 =============================================================
-Per-paragraph AI/Human heatmap via sliding-window ModernBERT.
+Per-paragraph AI/Human heatmap via sliding-window classification.
 
 Architecture
 ------------
   1. Segment text into overlapping windows (~300 words, 50% overlap).
-  2. Each window passed through the injected classify_fn (4-model ensemble).
+  2. Each window passed through the injected classify_fn (Desklib detector).
   3. Overlap scores averaged -> one score per paragraph.
   4. Breakpoint detection via gradient thresholding.
   5. 10-dimensional feature vector for Late Fusion.
@@ -515,7 +515,8 @@ class HybridSegmentAnalyzer:
             )
 
         # [FIX v3.9] Strip bibliography before segmenting — avoids counting
-        # APA references as AI paragraphs (they look like AI to ModernBERT).
+        # APA references as AI paragraphs (bibliography formatting can look
+        # AI-generated to the detector).
         body_text = _strip_references_section(text)
         paragraphs = self._segmenter.split_paragraphs(body_text)
         words = body_text.split()

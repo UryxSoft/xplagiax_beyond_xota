@@ -17,7 +17,7 @@
 > `xota_ensemble` ModernBERT classifier has been fully replaced by a single Desklib
 > DeBERTa-v3-large binary detector, and paragraph/sentence-boundary chunking has been replaced
 > by `segmentador_v1`, a TF-IDF/LSA topic-boundary semantic segmenter. Every endpoint, request
-> and response shape is unchanged — see [What's New](#-whats-new--v3000-beyond-xota-july-2026--novedades) below.
+> and response shape is unchanged — see [What's New](#-whats-new--v300-beyond-xota-july-2026--novedades) below.
 
 ---
 
@@ -141,7 +141,7 @@ The core classifier ([app/engine/detector_final.py](app/engine/detector_final.py
 Desklib-architecture detector at startup: a DeBERTa-v3-large backbone, mean-pooled hidden states,
 one linear classification head, sigmoid → `P(AI)` ∈ [0, 1]. This replaces the 2023-era 3-seed
 `xota_ensemble` ModernBERT classifier (41-class softmax averaged across three checkpoints) — see
-[BX-01](#-whats-new--v3000-beyond-xota-july-2026--novedades).
+[BX-01](#-whats-new--v300-beyond-xota-july-2026--novedades).
 
 | Aspect | Value |
 |---|---|
@@ -193,14 +193,23 @@ identical segment text scored via either path only pays for one forward pass.
 | `stylometric_analysis` | Detailed analysis of writing style: sentence structure, vocabulary richness, and burstiness. |
 | `hallucination_check` | Detects AI fabrication risk: internal inconsistencies and factual drift. |
 | `reasoning_check` | Detects reasoning-model signals (o1, DeepSeek-R1): CoT markers and causal density. |
-| `citation_check` | Verifies citations against CrossRef, Semantic Scholar, and OpenAlex. Detects fabricated references. |
 | `watermark_detection` | Detects statistical watermarks embedded in text by AI models. |
 | `zone_classifier` | Classifies text zones (direct quotes, paraphrases, original content). Detects citation style (APA/MLA/IEEE/Chicago/Vancouver/Harvard), coverage, and consistency. No network calls. |
 | `author_signature` | Intra-document authorship **consistency**. Splits the text into chunks and measures style dispersion — flags sections spliced from a different author/AI. Localization aid, not a verdict. |
 | `discourse_structure` | **Argumentative-structure uniformity** (model-agnostic). Detects templated discourse: even paragraphs, formal connectives, enumeration/closing scaffolding. Survives paraphrasing. |
 | `semantic_consistency` | **Internal-contradiction detection** (model-agnostic). Flags sentences that contradict each other (negation flips, numeric mismatches; optional NLI). |
 | `forensic_report` | Generates a full HTML forensic report via `ForensicReportGenerator`. Requires `full_analysis` pipeline. |
-| `full_analysis` | Complete pipeline: detection → stylometric → hallucination → reasoning → perplexity → segment → citation → author/discourse/semantic → **late fusion verdict** → forensic report. |
+| `full_analysis` | Complete pipeline: detection → stylometric → hallucination → reasoning → perplexity → segment → author/discourse/semantic → **late fusion verdict** → forensic report. |
+
+> **Removed plugin:** `citation_check` (network-bound fabricated-reference verification
+> against CrossRef/OpenAlex/Semantic Scholar) was deliberately removed — it added
+> 200-800 ms of sequential HTTP per request for a signal with no measured precision
+> gain (see `docs/auditorias/ENSHITTIFICATION_ANALYSIS.md` /
+> `ENSHITTIFICATION_IMPLEMENTATION.md`). `ENABLE_REFERENCE_CHECK` / `REFERENCE_NETWORK`
+> env vars are vestigial — no code reads them anymore. Citation-related functionality
+> that IS still live: `zone_classifier` (offline style/coverage, no network) and the
+> standalone `/api/v2/citations/detect` + `/api/v2/citations/validate` endpoints (§
+> [Antiplagio — Citation API](#antiplagio--citation-api-apiv2)).
 
 ### 🎓 Guía para profesores — ¿IA o Humano? Qué mide cada plugin (explicación dummie)
 
@@ -314,17 +323,20 @@ curl -X POST http://localhost:5006/analyze -H "Content-Type: application/json" \
   -d '{"text":"...","plugins":["reasoning_check"]}'
 ```
 
-#### 7. `citation_check` — ¿las referencias EXISTEN de verdad? (la prueba más fuerte)
+#### 7. Verificación de referencias — ¿las citas EXISTEN de verdad? (la prueba más fuerte)
 
-- **Qué hace (dummie):** toma las citas/bibliografía y las **verifica** contra bases reales
-  (CrossRef, Semantic Scholar, OpenAlex). La IA **fabrica** referencias que parecen reales.
-- **Cómo leerlo:** referencias `fabricated` (no existen) o `chimeric` (mezcla autores/título) →
-  **evidencia fuerte** de IA. Esto es lo más defendible ante un comité.
-- **Nota:** requiere red (`ENABLE_REFERENCE_CHECK=1`).
+- **Qué hace (dummie):** toma la bibliografía y la **verifica** contra bases reales (CrossRef,
+  Semantic Scholar, OpenAlex). La IA **fabrica** referencias que parecen reales.
+- **Cómo leerlo:** entradas con `status: "not_found"` → **evidencia fuerte** de IA. Esto es lo
+  más defendible ante un comité.
+- **Nota:** esto NO es un plugin de `/analyze` — es el endpoint dedicado
+  `POST /api/v2/citations/validate` (§ [Antiplagio — Citation
+  API](#antiplagio--citation-api-apiv2)). Requiere red. (Un `citation_check` de `/analyze`
+  existió en versiones anteriores y fue retirado — ver la nota de "Removed plugin" más arriba.)
 
 ```bash
-curl -X POST http://localhost:5006/analyze -H "Content-Type: application/json" \
-  -d '{"text":"... según Smith (2021)...\n\nReferencias\nSmith, J. (2021)...","plugins":["citation_check"]}'
+curl -X POST http://localhost:5006/api/v2/citations/validate -H "Content-Type: application/json" \
+  -d '{"text":"... según Smith (2021)...\n\nReferencias\nSmith, J. (2021)..."}'
 ```
 
 #### 8. `zone_classifier` — estilo de citación y cobertura (sin red)
@@ -450,15 +462,15 @@ curl -X POST http://localhost:5006/analyze -H "Content-Type: application/json" \
 | `stylometric_analysis` | `burstiness` | baja (frases parejas) | alta (frases variadas) |
 | `hallucination_check` | `risk_level` | HIGH (inventa/incoherente) | LOW |
 | `reasoning_check` | `ai_score` | alto (CoT, retrocesos) | bajo |
-| `citation_check` | refs `fabricated`/`chimeric` | **>0 = evidencia fuerte** | 0, todas verificadas |
+| `POST /api/v2/citations/validate` | refs `status:not_found` | **>0 = evidencia fuerte** | 0, todas verificadas |
 | `author_signature` | `outlier_count` | >0 (trozo pegado) | 0 (un solo estilo) |
 | `discourse_structure` | `uniformity` | alto (>0.55, plantilla) | bajo (<0.3, orgánico) |
 | `semantic_consistency` | `contradiction_count` | >0 (se contradice) | 0 (coherente) |
 | `full_analysis` | `fusion.probability` | cerca de 1 | cerca de 0 |
 
 > **Recordatorio final para el comité:** las señales **fuertes y defendibles** son las
-> verificables — **citas fabricadas** (`citation_check`), **contradicciones internas**
-> (`semantic_consistency`) y **secciones con estilo distinto** (`author_signature`). El
+> verificables — **citas fabricadas** (`POST /api/v2/citations/validate`), **contradicciones
+> internas** (`semantic_consistency`) y **secciones con estilo distinto** (`author_signature`). El
 > porcentaje neuronal y la perplejidad son **apoyo**, no prueba, sobre todo con IA de 2025‑2026.
 
 ---
@@ -701,7 +713,7 @@ curl -X POST http://localhost:5006/analyze_document \
 # Multiple plugins — all run, segments injected into ai_detection
 curl -X POST http://localhost:5006/analyze_document \
   -H "Content-Type: application/json" \
-  -d '{"text": "...", "plugins": ["ai_detection", "perplexity_check", "citation_check"]}'
+  -d '{"text": "...", "plugins": ["ai_detection", "perplexity_check", "reasoning_check"]}'
 ```
 
 ---
@@ -889,10 +901,6 @@ conditional on active plugins and environment flags (noted inline).
           ]
         },
 
-        "citations": {                   // when ENABLE_REFERENCE_CHECK=1
-          "ai_score": 0, "risk_level": "N/A", "total_references": 0
-        },
-
         "author_signature": {            // Tier-1 — embedding or stylometric source
           "consistency_score": 0.82, "outlier_count": 1,
           "outlier_ratio": 0.08,
@@ -934,7 +942,7 @@ conditional on active plugins and environment flags (noted inline).
 
 ### POST /analyze_stream
 
-Run plugins on a text and receive results as they complete via **Server-Sent Events (SSE)**. Fast plugins (e.g., `zone_classifier`) deliver their result immediately; slow plugins (e.g., `citation_check`) stream in as they finish. No waiting for the slowest plugin.
+Run plugins on a text and receive results as they complete via **Server-Sent Events (SSE)**. Fast plugins (e.g., `zone_classifier`) deliver their result immediately; slower plugins (e.g., `full_analysis`) stream in as they finish. No waiting for the slowest plugin.
 
 Rate limit: **30 requests/minute**.
 
@@ -1518,7 +1526,7 @@ curl -N -X POST http://localhost:5006/analyze_stream \
   -H "Accept: text/event-stream" \
   -d '{
     "text": "Your text here...",
-    "plugins": ["ai_detection", "perplexity_check", "citation_check"]
+    "plugins": ["ai_detection", "perplexity_check", "reasoning_check"]
   }'
 ```
 
@@ -2088,8 +2096,6 @@ docker run -d \
 | `GUNICORN_THREADS` | `4` | Threads per gthread worker (I/O responsiveness during heavy sync analyses) |
 | `PERPLEXITY_TIER2` | `1` | Enable GPT-2 Tier 2 perplexity (`0` to disable) |
 | `PERPLEXITY_DICT_PATH` | _(none)_ | Path to custom n-gram frequency dictionary |
-| `REFERENCE_NETWORK` | `1` | Enable live citation network calls (`0` to disable) |
-| `ENABLE_REFERENCE_CHECK` | `0` | Include citation check in `full_analysis` pipeline |
 | `ENABLE_WATERMARK` | `0` | Include watermark detection in `full_analysis` pipeline |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL (rate limiter + cache + Celery) |
 | `REDIS_PASSWORD` | _(empty)_ | Redis password — appended to connection URL when set |
@@ -2137,11 +2143,16 @@ xplagiax_xota/
 │   │   ├── stylometric_analysis.py # Writing style fingerprinting
 │   │   ├── hallucination_check.py # AI fabrication risk detection
 │   │   ├── reasoning_check.py     # Reasoning-model detection (o1/R1)
-│   │   ├── citation_check.py     # Reference existence verification
 │   │   ├── watermark_detection.py # Digital watermark detection
-│   │   ├── zone_classifier.py    # Citation zone detection plugin
+│   │   ├── zone_classifier.py    # Citation zone detection (offline, no network)
+│   │   ├── author_signature.py   # Intra-document authorship consistency (Tier-1)
+│   │   ├── discourse_structure.py # Templated-discourse uniformity (Tier-1)
+│   │   ├── semantic_consistency.py # Internal-contradiction detection (Tier-1)
 │   │   ├── forensic_report.py    # HTML forensic report (decoupled via get_orchestrator())
 │   │   └── full_analysis.py      # Complete forensic pipeline (orchestrator singleton)
+│   │   # (citation_check.py existed pre-v3.0.0 — network-bound reference
+│   │   #  verification, removed in the enshittification cleanup; see the
+│   │   #  "Removed plugin" note in the Plugins section above)
 │   │
 │   └── engine/                   # XplagiaX core engine
 │       ├── __init__.py           # sys.path setup + torch/transformers patch
@@ -2496,7 +2507,7 @@ docker run -d \
 
 > **Histórico, pre-BX-01.** `_classify_batch_from_ids()` y el tokenizer rápido de ModernBERT
 > descritos en AC-01 ya no existen — fueron reemplazados por el detector Desklib de v3.0.0
-> (ver [BX-01](#-whats-new--v3000-beyond-xota-july-2026--novedades)). Se conserva como
+> (ver [BX-01](#-whats-new--v300-beyond-xota-july-2026--novedades)). Se conserva como
 > registro de auditoría del bug y su corrección en su momento.
 
 ### Correctness — Verdict Inversion (crítico)
@@ -2512,7 +2523,12 @@ docker run -d \
 | AC-02 | `PluginRegistry.run()` usaba `with ThreadPoolExecutor(...)`, cuyo `__exit__` llama `shutdown(wait=True)`. Eso **re-bloqueaba hasta que TODOS los hilos de plugin terminaran**, incluso los ya reportados como timed-out — un plugin colgado ataba el worker de gunicorn indefinidamente, pasando el timeout anunciado. `run_stream()` no tenía el problema (usa `as_completed(timeout=)`), quedando inconsistente. | Ciclo de vida explícito con `try/finally` + `shutdown(wait=False, cancel_futures=True)` en [app/plugin_registry.py](app/plugin_registry.py). `run()` retorna al vencer el timeout; el hilo colgado sigue en background sin bloquear el request. Verificado: con un plugin de 30 s y `timeout=2 s`, `run()` retorna en 2.08 s. |
 | AC-03 | `PluginOrchestrator` es singleton, así que `config.forensic_output_path` (fijo) hacía que requests concurrentes de `full_analysis` escribieran **el mismo archivo HTML** del reporte forense — race condition en disco. | Path único por run vía `_unique_report_path()`, propagado en el dict de resultado como `forensic_report_path` y leído por `summary()`. [app/engine/plugin_orchestrator.py](app/engine/plugin_orchestrator.py). La respuesta del API ya usaba su propio `NamedTemporaryFile`, así que este era un side-write redundante y racy; ahora es único. |
 
-> **Ningún plugin fue eliminado ni desactivado.** Los cambios tocan solo el mecanismo de timeout del thread pool y el path del reporte. Análisis que aparecen como `inconclusive` en textos cortos (`author_signature`, `discourse_structure`, `semantic_consistency`, `segment_analysis`) se saltan por longitud mínima (≥3 chunks / ≥4 oraciones), no por eliminación; `watermark` y `reference_check` se controlan por `ENABLE_WATERMARK` / `ENABLE_REFERENCE_CHECK`.
+> **Ningún plugin fue eliminado ni desactivado.** Los cambios tocan solo el mecanismo de timeout del thread pool y el path del reporte. Análisis que aparecen como `inconclusive` en textos cortos (`author_signature`, `discourse_structure`, `semantic_consistency`, `segment_analysis`) se saltan por longitud mínima (≥3 chunks / ≥4 oraciones), no por eliminación; `watermark` se controla por `ENABLE_WATERMARK`.
+>
+> *(Nota posterior: esta afirmación era cierta en el momento de este changelog —
+> julio 2026, Fase 1. `citation_check`/`reference_check` SÍ fue eliminado después,
+> en una limpieza "anti-enshittification" posterior — ver la nota "Removed plugin"
+> en la sección Plugins.)*
 
 ---
 

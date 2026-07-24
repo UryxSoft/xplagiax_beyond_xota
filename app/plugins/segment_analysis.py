@@ -33,7 +33,7 @@ class SegmentAnalysisPlugin(BasePlugin):
 
     def description(self) -> str:
         return (
-            "Per-paragraph AI/Human heatmap via sliding-window ModernBERT. "
+            "Per-paragraph AI/Human heatmap via the Desklib AI-text detector. "
             "Shows which paragraphs are AI-generated vs human-written."
         )
 
