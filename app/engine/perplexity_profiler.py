@@ -371,11 +371,7 @@ class NgramDictionary:
                 rate = processed / elapsed if elapsed > 0 else 0
                 mem_est = sum(len(c) for c in counters.values())
                 logger.info(
-                    "Progress: %d texts | %.0f texts/sec | %d unique n-grams in memory",
-                    processed, rate, mem_est,
-                )
-                logger.info(
-                    "  [%d texts] %.0f texts/sec | %d n-grams | %.0fs elapsed",
+                    "Progress: %d texts | %.0f texts/sec | %d unique n-grams in memory | %.0fs elapsed",
                     processed, rate, mem_est, elapsed,
                 )
 

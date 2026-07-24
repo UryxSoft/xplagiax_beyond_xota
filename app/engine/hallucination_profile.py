@@ -51,12 +51,10 @@ Requires
 
 from __future__ import annotations
 
-import functools
 import logging
 import math
 import re
 import statistics
-import warnings
 from collections import Counter
 from dataclasses import dataclass
 from typing import (
@@ -1016,40 +1014,3 @@ class HallucinationRiskClassifier:
         then ``classify()`` to amortise parsing.
         """
         return self.classify(profiler.compute_stats(text))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Backward compatibility (proper DeprecationWarning)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _deprecated_compute_risk_summary(
-    text: str,
-    profiler: Optional[HallucinationProfiler] = None,
-    config: Optional[HallucinationRiskConfig] = None,
-) -> Dict[str, Any]:
-    """
-    **DEPRECATED** — Use ``HallucinationRiskClassifier.classify_from_text()``.
-
-    Kept for backward compatibility.  Emits ``DeprecationWarning`` on
-    every call so downstream code discovers the migration path.
-    """
-    warnings.warn(
-        "compute_risk_summary() is deprecated. "
-        "Use HallucinationRiskClassifier.classify_from_text() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if profiler is None:
-        profiler = HallucinationProfiler()
-    classifier = HallucinationRiskClassifier(config)
-    return classifier.classify_from_text(text, profiler)
-
-
-@functools.wraps(_deprecated_compute_risk_summary)
-def compute_risk_summary(
-    text: str,
-    profiler: Optional[HallucinationProfiler] = None,
-    config: Optional[HallucinationRiskConfig] = None,
-) -> Dict[str, Any]:
-    return _deprecated_compute_risk_summary(text, profiler, config)

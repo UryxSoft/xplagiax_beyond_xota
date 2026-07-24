@@ -68,6 +68,18 @@ AutoTokenizer.from_pretrained(name); \
 AutoModel.from_pretrained(name); \
 print('Desklib model + tokenizer cached OK:', name)"
 
+# ── Pre-download GPT-2 Small for the perplexity_check plugin's Tier 2 ────────
+# perplexity_profiler.py's _GPT2Engine loads "gpt2" via from_pretrained() with
+# no local_files_only guard, and PERPLEXITY_TIER2 defaults to enabled — so
+# without this, the first perplexity_check request in a network-restricted
+# container silently falls back to Tier 1 (n-gram proxy only) instead of using
+# the real GPT-2 token-level perplexity it was configured for.
+RUN python -c "\
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast; \
+GPT2TokenizerFast.from_pretrained('gpt2'); \
+GPT2LMHeadModel.from_pretrained('gpt2'); \
+print('GPT-2 Small cached OK')"
+
 
 # ====================== STAGE 2: Runtime ======================
 FROM python:3.12-slim-bookworm
