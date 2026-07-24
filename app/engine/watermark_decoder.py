@@ -437,6 +437,34 @@ class EntropyAnalyzer:
         """Load model + tokenizer on first use.  Raises WatermarkModelError."""
         if self._model is not None:
             return
+
+        # [C-DUP-GPT2] Reuse perplexity_profiler's GPT-2 singleton when it is
+        # already resident instead of loading a second independent copy. Both
+        # engines default to the same "gpt2" checkpoint; PERPLEXITY_TIER2
+        # (on by default) loads it eagerly at app startup, so an unmodified
+        # watermark analysis would otherwise double GPT-2's resident memory
+        # the first time it runs. This only peeks at an already-constructed
+        # singleton — it never forces an eager load — so PERPLEXITY_TIER2=0
+        # deployments keep today's fully lazy, independent load below.
+        if self._model_id == "gpt2" and self._tokenizer is None:
+            try:
+                from perplexity_profiler import _GPT2Engine
+                shared = _GPT2Engine._instance
+                if (
+                    shared is not None
+                    and shared._available
+                    and shared.device == self._device
+                ):
+                    self._tokenizer = shared.tokenizer
+                    self._model = shared.model
+                    logger.info(
+                        "Entropy analyzer: reusing shared GPT-2 "
+                        "(perplexity Tier 2 singleton)"
+                    )
+                    return
+            except Exception:
+                pass  # fall through to the independent load below
+
         logger.info("Loading entropy analyzer model: %s", self._model_id)
         try:
             if self._tokenizer is None:

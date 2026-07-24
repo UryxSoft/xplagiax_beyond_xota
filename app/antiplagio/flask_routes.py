@@ -50,7 +50,7 @@ def async_route(f):
 def detect_citations():
     """
     Citation detection only (no plagiarism scoring, no external API calls).
-    Fast — pure regex + optional spaCy.
+    Fast — pure regex, no ML/NLP dependency.
 
     Body: { "text": "..." }
 

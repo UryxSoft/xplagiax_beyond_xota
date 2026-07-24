@@ -212,7 +212,8 @@ class CitationPatterns:
 class TextSegmenter:
     """
     Divides text into semantic zones before citation analysis.
-    Falls back to rule-based segmentation when spaCy is unavailable.
+    Pure regex-based (quote markers + bibliography header patterns) —
+    no spaCy or other NLP dependency.
     """
 
     def __init__(self):
@@ -731,8 +732,9 @@ class CitationDetector:
 
 
 # ── Module-level singleton (P-09) ─────────────────────────────────
-# Both flask_routes and full_analysis import this factory so the spaCy
-# model is loaded exactly once at gunicorn preload, shared via CoW.
+# Both flask_routes and full_analysis import this factory so CitationDetector
+# (regex patterns + compiled state) is built exactly once at gunicorn
+# preload, shared via CoW instead of duplicated per consumer.
 _shared_detector: Optional[CitationDetector] = None
 
 

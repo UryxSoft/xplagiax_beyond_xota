@@ -5,7 +5,7 @@ Wraps CitationDetector to classify text zones (direct quotes, paraphrases,
 original), detect citation style (APA/MLA/IEEE/Chicago/Vancouver/Harvard),
 and report coverage + consistency metrics.
 
-No network calls. No ML models. Pure regex + optional spaCy.
+No network calls. No ML models. Pure regex.
 """
 
 import logging
