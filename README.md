@@ -1,11 +1,11 @@
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
-║                                                                        ║
-║   X P L A G I A X   ·   B E Y O N D   X O T A                         ║
-║                                                                        ║
-║   Forensic AI-Text Detection & Citation Integrity Microservice        ║
-║   Desklib DeBERTa-v3-large · Topic-Aware Segmentation · Late Fusion   ║
-║                                                                        ║
+║                                                                      ║
+║   X P L A G I A X   ·   B E Y O N D   X O T A                        ║
+║                                                                      ║
+║   Forensic AI-Text Detection & Citation Integrity Microservice       ║
+║   Desklib DeBERTa-v3-large · Topic-Aware Segmentation · Late Fusion  ║
+║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -99,11 +99,11 @@ Client
 │  ├── CitationDetector singleton loaded ONCE (CoW-safe)         │
 │  ├── PluginRegistry auto-discovers all plugins                 │
 │  └── create_app() called once                                  │
-│                  │ fork (Linux CoW + POSIX shm)               │
-│  ┌───────────────▼──────┐  ┌──────────────────────┐           │
-│  │  gthread Worker 1     │  │  Celery Worker        │           │
-│  │  2 threads, ~150 MB   │  │  2 threads, ~150 MB   │           │
-│  │  models: shared shm   │  │  models: shared shm   │           │
+│                  │ fork (Linux CoW + POSIX shm)                │
+│  ┌───────────────▼──────┐  ┌──────────────────────┐            │
+│  │  gthread Worker 1     │  │  Celery Worker        │          │
+│  │  2 threads, ~150 MB   │  │  2 threads, ~150 MB   │          │
+│  │  models: shared shm   │  │  models: shared shm   │          │
 │  └───────────────────────┘  └───────────────────────┘          │
 │                                                                │
 │  Redis (optional)                                              │
