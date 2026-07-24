@@ -2,7 +2,7 @@
 app/plugins/author_signature.py — Intra-document authorship consistency.
 
 Activates the (previously dormant) authorship analysis inside StylometricProfiler
-(see AUDITORIA_CIENTIFICA.md §13 — the pipeline only ever called compute_stats()).
+(see docs/auditorias/AUDITORIA_CIENTIFICA.md §13 — the pipeline only ever called compute_stats()).
 
 Mode: NO reference author profile is required. The document is split into chunks; a
 descriptive stylometric vector is extracted per chunk via StylometricProfiler.compute_stats,

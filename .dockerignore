@@ -32,10 +32,23 @@ nohup.out
 .vscode/
 .idea/
 
-# ── Docs (not needed at runtime) ─────────────────────────────────────────────
+# ── Docs (not needed at runtime; also shrinks the build context sent to the
+#    Docker daemon before the build even starts) ─────────────────────────────
 README.md
 README*.md
 *.md
+docs/
+
+# ── Tests / dev tooling / non-runtime scripts ────────────────────────────────
+tests/
+scripts/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Session/patch artifacts (never part of the runtime image) ───────────────
+*.tar.gz
+.claude/
 
 # ── Test data ────────────────────────────────────────────────────────────────
 te.text

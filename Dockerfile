@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # Dockerfile — XplagiaX AI Detection Microservice
 #
@@ -24,11 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Copy requirements and install all Python packages in a SINGLE pip call.
+# Copy requirements and install Python packages (torch from its own CPU-only
+# index in a dedicated step below, everything else together).
 # NOTE: torch>=2.2.2,<2.3 in requirements.txt is the local macOS pin.
 #       On Python 3.12 Linux (this container) we override torch to >=2.4.0
 #       which is compatible with numpy<2.0 and transformers<5.0.
-#       We pass the overrides AFTER -r so they win over the file constraints.
 COPY requirements.txt .
 
 # ── Resolve Dependency Conflicts ─────────────────────────────────────────────
@@ -37,12 +38,28 @@ COPY requirements.txt .
 # are preserved for reproducible builds — the broad sed was erasing them.
 RUN sed -i '/^torch/d' requirements.txt
 
-RUN pip install --user --no-cache-dir --prefer-binary \
-    "torch>=2.4.0" \
+# ── torch: CPU-only wheel ─────────────────────────────────────────────────────
+# This image has no CUDA runtime and no GPU device (torch.device() already
+# auto-detects "cpu" everywhere in app/engine/ when torch.cuda.is_available()
+# is False, which it always is here) — the default PyPI torch wheel still
+# bundles the full CUDA/cuDNN/NCCL runtime (~2-2.5 GB of nvidia-* wheels) that
+# never gets used. Installing from PyTorch's dedicated CPU index instead pulls
+# a ~200-300 MB build with identical CPU numerics, cutting the single biggest
+# contributor to both build time and image size with zero effect on inference
+# results. --mount=type=cache persists pip's wheel cache BETWEEN builds (not
+# into the final image) so an unchanged requirements.txt reuses already
+# -downloaded wheels instead of re-fetching them on every rebuild.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --user --prefer-binary \
+    --index-url https://download.pytorch.org/whl/cpu \
+    "torch>=2.4.0"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --user --prefer-binary \
     "numpy>=1.26.4,<2.0" \
     "transformers>=4.48.2,<5.0" \
     "spacy>=3.7.0" \
-    && pip install --user --no-cache-dir -r requirements.txt
+    && pip install --user --prefer-binary -r requirements.txt
 
 # ── Pre-download NLTK data (punkt_tab used by sentence splitting) ────────────
 RUN python -c "\
