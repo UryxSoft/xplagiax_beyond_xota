@@ -18,8 +18,12 @@ _available = False
 
 try:
     import torch
-    from app.engine.watermark_decoder import WatermarkDecoder
-    _decoder = WatermarkDecoder()
+    # [C1] Shared singleton — same instance the orchestrator (full_analysis)
+    # uses when ENABLE_WATERMARK=1. Previously instantiated its own
+    # WatermarkDecoder here, duplicating the GPT-2-based model in memory
+    # whenever both this plugin and full_analysis were active.
+    from app.engine.engines import get_watermark_decoder
+    _decoder = get_watermark_decoder()
     _available = True
     logger.info("WatermarkDecoder loaded")
 except Exception as exc:

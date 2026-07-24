@@ -19,8 +19,12 @@ _detector = None
 _available = False
 
 try:
-    from app.antiplagio.citation.detector import CitationDetector, ZoneType
-    _detector = CitationDetector()
+    # [C1] Shared singleton — same instance app/antiplagio/flask_routes.py and
+    # full_analysis.py use. Previously instantiated its own CitationDetector
+    # here, duplicating it whenever this plugin and full_analysis were both
+    # active in the same process.
+    from app.antiplagio.citation.detector import ZoneType, get_citation_detector
+    _detector = get_citation_detector()
     _available = True
     logger.info("CitationDetector loaded (zone_classifier ready)")
 except Exception as exc:
