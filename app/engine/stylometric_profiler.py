@@ -305,6 +305,14 @@ class StyleProfile:
     # -- Adaptive threshold ---------------------------------------------
     adaptive_threshold: Optional[float] = None
 
+# Minimum word-count below which hapax-legomena ratio is meaningless as a
+# stylometric signal (in a < _HAPAX_MIN_WORDS word fragment almost every word
+# appears once by chance — no room for repetition regardless of authorship).
+# Zeroed out instead of omitted so fusion's weight * 0.0 contributes nothing
+# in either direction (neutral, not pro-human).
+_HAPAX_MIN_WORDS: int = 30
+
+
 def _extract_lexical_features(text: str) -> Dict[str, float]:
     """Extract vocabulary richness, word length, and rarity metrics."""
     words = re.findall(r"\b\w+\b", text.lower())
