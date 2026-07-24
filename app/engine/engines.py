@@ -68,7 +68,7 @@ def get_reasoning_profiler() -> Any:
 
 
 def get_reasoning_classifier() -> Any:
-    from forensic_reports import ReasoningRiskClassifier
+    from reasoning_profiler import ReasoningRiskClassifier
     return _get("reasoning_classifier", ReasoningRiskClassifier)
 
 

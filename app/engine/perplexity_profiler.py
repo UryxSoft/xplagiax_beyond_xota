@@ -526,6 +526,10 @@ class _GPT2Engine:
             logger.info("GPT-2 Tier 2: loading model on %s...", self.device)
 
             self.tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+            # GPT-2's tokenizer ships with no pad token; batching windows in
+            # perplexity_per_window() requires one to right-pad the batch.
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = GPT2LMHeadModel.from_pretrained("gpt2")
             self.model.to(self.device).eval()
 
@@ -577,18 +581,74 @@ class _GPT2Engine:
             logger.warning("GPT-2 token_log_probs failed: %s", exc)
             return None
 
-    def perplexity_per_window(self, windows: List[str], max_tokens: int = 512
-                              ) -> List[float]:
-        """Compute GPT-2 perplexity for each text window."""
-        ppls = []
-        for w in windows:
-            lp = self.token_log_probs(w, max_tokens)
-            if lp is not None and len(lp) > 0:
-                avg_neg_lp = -float(np.mean(lp))
-                ppl = 2.0 ** avg_neg_lp
-                ppls.append(float(np.clip(ppl, 1.0, 10000.0)))
-            else:
-                ppls.append(_HUMAN_PPL_TYPICAL * 10)  # fallback
+    def batch_token_log_probs(
+        self, texts: List[str], max_tokens: int = 512
+    ) -> List[Optional[np.ndarray]]:
+        """
+        Batched version of token_log_probs(): one forward pass for the whole
+        list instead of one per text. GPT-2 is a causal (left-to-right) model,
+        so right-padding never influences a real token's logits regardless of
+        the attention_mask — each position only ever attends to itself and
+        earlier positions. Per-sequence results are therefore numerically
+        identical to calling token_log_probs() once per text; only the padded
+        tail (sliced off via attention_mask before returning) differs.
+        """
+        if not self._available or not texts:
+            return [None] * len(texts)
+
+        import torch
+
+        try:
+            inputs = self.tokenizer(
+                texts, return_tensors="pt", truncation=True,
+                max_length=max_tokens, padding=True,
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits  # (B, seq_len, vocab_size)
+
+            shift_logits = logits[:, :-1, :]
+            shift_labels = inputs["input_ids"][:, 1:]
+            shift_mask = inputs["attention_mask"][:, 1:]
+
+            log_probs = torch.log_softmax(shift_logits, dim=-1)
+            token_log_probs = log_probs.gather(
+                2, shift_labels.unsqueeze(-1)
+            ).squeeze(-1)  # (B, seq_len-1)
+            token_log_probs = (token_log_probs / math.log(2)).cpu().numpy()
+
+            lengths = shift_mask.sum(dim=1).cpu().numpy()
+            return [
+                token_log_probs[i, : int(lengths[i])]
+                for i in range(len(texts))
+            ]
+
+        except Exception as exc:
+            logger.warning("GPT-2 batch_token_log_probs failed: %s", exc)
+            return [None] * len(texts)
+
+    def perplexity_per_window(self, windows: List[str], max_tokens: int = 512,
+                              batch_size: int = 8) -> List[float]:
+        """
+        Compute GPT-2 perplexity for each text window.
+
+        Windows are scored in batches (one tokenizer + forward-pass call per
+        batch) instead of one window at a time — a document with many windows
+        no longer pays a separate forward pass per window. Results are
+        numerically identical to the unbatched path (see
+        batch_token_log_probs docstring).
+        """
+        ppls: List[float] = []
+        for i in range(0, len(windows), batch_size):
+            chunk = windows[i:i + batch_size]
+            for lp in self.batch_token_log_probs(chunk, max_tokens):
+                if lp is not None and len(lp) > 0:
+                    avg_neg_lp = -float(np.mean(lp))
+                    ppl = 2.0 ** avg_neg_lp
+                    ppls.append(float(np.clip(ppl, 1.0, 10000.0)))
+                else:
+                    ppls.append(_HUMAN_PPL_TYPICAL * 10)  # fallback
         return ppls
 
     def conditional_curvature(self, text: str, n_samples: int = 100,

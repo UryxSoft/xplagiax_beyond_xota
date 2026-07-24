@@ -42,7 +42,7 @@ Changelog (v3.4 -> v3.5)
          __init__ so _build_reasoning_html() can populate group_scores,
          top_signals, and feature_details tables (previously empty).
   [FIX]  Reasoning dict produced by orchestrator now uses
-         ReasoningRiskClassifier.classify() (from forensic_reports.py)
+         ReasoningRiskClassifier.classify() (from reasoning_profiler.py)
          to generate the FULL reasoning analysis structure instead of
          the partial {ai_score, risk_level, feature_values} dict.
 
